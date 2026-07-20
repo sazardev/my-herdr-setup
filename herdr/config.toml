@@ -31,6 +31,11 @@ pane_gaps = false
 # queda como único divisor visible entre paneles (sin gap extra).
 pane_borders = true
 
+# Oculta la fila de tabs cuando el workspace tiene un solo tab — menos
+# ruido visual cuando no hace falta elegir entre varios. Los tabs nuevos
+# se pueden seguir creando con el keybinding configurado (prefix+c).
+hide_tab_bar_when_single_tab = true
+
 [ui.toast]
 # Sin notificaciones pop-up (ni in-app ni del sistema). El estado de cada
 # agente ya se ve en el sidebar; los toasts no aportan aquí y distraen.

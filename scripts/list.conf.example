@@ -1,0 +1,11 @@
+# Lista de workspaces para herdr-workspace / herdr-workspace-safe.
+# Cada clone es un checkout INDEPENDIENTE (su propio .git).
+#
+# Formato:  etiqueta|ruta     (# = comentario, ~ = tu home)
+# El ORDEN define en qué pane del grid cae cada uno.
+#
+# Copia este archivo a ~/.config/herdr-workspaces/list.conf (o a la ruta que
+# apunte HERDR_WORKSPACE_CONF) y edítalo con tus propios proyectos/clones.
+proyecto-a|~/dev/mi-proyecto
+proyecto-b|~/dev/mi-proyecto-agentic-2
+proyecto-c|~/dev/mi-proyecto-agentic-3

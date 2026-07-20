@@ -1,0 +1,9 @@
+# Runtime de herdr (sockets, logs, sesión con tokens) — nunca debe versionarse.
+*.sock
+*.log
+session.json
+
+# Respaldo que crea install.sh al reemplazar un config.toml existente.
+*.bak.*
+
+.DS_Store

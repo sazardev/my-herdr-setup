@@ -1,0 +1,34 @@
+# herdr configuration — sazardev
+# Destino: ~/.config/herdr/config.toml (Linux/macOS/WSL, ruta XDG)
+#
+# Referencia completa de opciones y sus valores por defecto:
+#   herdr --default-config
+#
+# Solo se listan aquí las opciones que se cambiaron respecto al default.
+# Cualquier otra opción usa el comportamiento estándar de herdr.
+
+[theme]
+# Tema oscuro con buen contraste y colores tierra, cómodo para sesiones largas.
+# Otros temas built-in: catppuccin, terminal, tokyo-night, dracula, nord,
+#                        one-dark, solarized, kanagawa, rose-pine, vesper
+name = "gruvbox"
+
+# No seguir automáticamente el modo claro/oscuro del terminal host:
+# el tema se elige manualmente arriba y se queda fijo entre sistemas.
+auto_switch = false
+
+[ui]
+# Ordena el panel de agentes por prioridad de atención (quién necesita
+# respuesta) en vez de agrupar por espacio/workspace. Útil con varios
+# agentes corriendo en paralelo.
+agent_panel_sort = "priority"
+
+[ui.toast]
+# Sin notificaciones pop-up (ni in-app ni del sistema). El estado de cada
+# agente ya se ve en el sidebar; los toasts no aportan aquí y distraen.
+delivery = "off"
+
+[keys]
+# prefix+shift+1..9 cambia de workspace directo por índice, sin pasar por
+# el workspace picker (prefix+w).
+switch_workspace = "prefix+shift+1..9"

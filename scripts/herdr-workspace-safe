@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# herdr-workspace-safe — igual que herdr-workspace, pero NUNCA descarta
+# cambios sin commitear ni fuerza un cambio de rama que pudiera perderlos:
+#
+#   1) git fetch --prune (best-effort; si falla, se omite la sync pero
+#      claude se lanza igual).
+#   2) si hay cambios sin commitear: NO se tocan (nada de reset --hard ni
+#      clean -fd), NO se cambia de rama. Se avisa por qué y claude se lanza
+#      en la rama actual.
+#   3) si está limpio y no está en $HERDR_WORKSPACE_BRANCH: checkout a esa
+#      rama (crea la rama local desde origin/<rama> si hace falta).
+#   4) si está limpio y sincronizado: git pull --ff-only. Si diverge, se
+#      avisa y se deja tal cual (sin merge/rebase forzado).
+#
+# claude SIEMPRE se lanza salvo que ni siquiera se pueda entrar al directorio
+# del workspace.
+#
+# Mismas variables de entorno que herdr-workspace (ver ese script).
+# ============================================================================
+set -uo pipefail
+CONF="${HERDR_WORKSPACE_CONF:-$HOME/.config/herdr-workspaces/list.conf}"
+LAUNCH_DIR="${HERDR_WORKSPACE_LAUNCH_DIR:-$HOME/.cache/herdr-workspaces}"
+LOG_DIR="$LAUNCH_DIR/logs/$(date +%Y%m%d-%H%M%S)-herdr-safe"
+WS_LABEL="${HERDR_WORKSPACE_LABEL:-claude workspaces safe}"
+REQUIRED_BRANCH="${HERDR_WORKSPACE_BRANCH:-main}"
+PS_EXE="${PS_EXE:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
+
+command -v herdr  >/dev/null || { echo "falta herdr en PATH"; exit 1; }
+command -v jq     >/dev/null || { echo "falta jq"; exit 1; }
+command -v claude >/dev/null || { echo "falta claude en PATH"; exit 1; }
+[ -f "$CONF" ] || { echo "falta la lista de workspaces: $CONF (ver scripts/list.conf.example)"; exit 1; }
+herdr status >/dev/null 2>&1 || { echo "no hay servidor herdr corriendo (abre herdr primero)"; exit 1; }
+mkdir -p "$LAUNCH_DIR" "$LOG_DIR"
+
+labels=(); dirs=()
+while IFS='|' read -r lb dr; do
+  lb="${lb## }"; lb="${lb%% }"
+  [[ -z "$lb" || "$lb" == \#* ]] && continue
+  dr="${dr## }"; dr="${dr%% }"; dr="${dr/#\~/$HOME}"
+  if [ ! -d "$dr/.git" ]; then
+    echo "  · omito '$lb' (no existe $dr)"; continue
+  fi
+  labels+=("$lb"); dirs+=("$dr")
+done < "$CONF"
+
+n=${#labels[@]}
+[ "$n" -eq 0 ] && { echo "Ningún workspace existe. Revisa $CONF"; exit 1; }
+
+old_id="$(herdr workspace list 2>/dev/null | jq -r --arg lb "$WS_LABEL" '.result.workspaces[] | select(.label==$lb) | .workspace_id' | head -n1)"
+if [ -n "$old_id" ]; then
+  echo "cerrando space previo '$WS_LABEL' ($old_id)…"
+  herdr workspace close "$old_id" >/dev/null 2>&1 || true
+fi
+
+make_launcher() {
+  local lb="$1" dir="$2" log="$3"
+  local launcher="$LAUNCH_DIR/hws_${lb}.sh"
+  cat > "$launcher" <<EOF
+#!/usr/bin/env bash
+LOG="$log"
+LB="$lb"
+DIR="$dir"
+PS_EXE="$PS_EXE"
+REQUIRED_BRANCH="$REQUIRED_BRANCH"
+
+cd "\$DIR" || { echo "✗ [\$LB] claude NO se lanzó por: no se pudo entrar a \$DIR"; exit 1; }
+: > "\$LOG"
+
+log()  { printf '%s\n' "\$1" | tee -a "\$LOG"; }
+run()  { log "+ \$*"; "\$@" >>"\$LOG" 2>&1; return \$?; }
+
+notify() {
+  [ -x "\$PS_EXE" ] || return 0
+  "\$PS_EXE" -NoProfile -NonInteractive -Command "
+    Add-Type -AssemblyName System.Windows.Forms;
+    \\\$n = New-Object System.Windows.Forms.NotifyIcon;
+    \\\$n.Icon = [System.Drawing.SystemIcons]::Information;
+    \\\$n.Visible = \\\$true;
+    \\\$n.ShowBalloonTip(6000,'herdr-workspace-safe: \$LB','\$1','Info');
+    Start-Sleep -Milliseconds 800
+  " >/dev/null 2>&1 &
+}
+
+log "── \$LB (\$DIR) ──"
+
+synced=1
+
+if ! run git fetch --prune origin; then
+  log "⚠ [\$LB] git fetch falló (sin red/credenciales; ver log). Se omite sincronización, se abre tal cual."
+  synced=0
+fi
+
+if [ "\$synced" -eq 1 ] && [ -n "\$(git status --porcelain)" ]; then
+  branch="\$(git rev-parse --abbrev-ref HEAD)"
+  log "⚠ [\$LB] hay cambios sin commitear en rama '\$branch': NO se descartan y NO se cambia de rama (modo seguro)."
+  log "   Cuando termines, commitea o guarda un stash y corre 'herdr-workspace-safe' de nuevo para sincronizar con \$REQUIRED_BRANCH."
+  synced=0
+fi
+
+if [ "\$synced" -eq 1 ]; then
+  branch="\$(git rev-parse --abbrev-ref HEAD)"
+  if [ "\$branch" != "\$REQUIRED_BRANCH" ]; then
+    if git show-ref --verify --quiet "refs/heads/\$REQUIRED_BRANCH"; then
+      if run git checkout "\$REQUIRED_BRANCH"; then
+        log "cambiado a rama: \$REQUIRED_BRANCH"
+      else
+        log "⚠ [\$LB] no se pudo cambiar a \$REQUIRED_BRANCH (ver log); se queda en '\$branch'."
+        synced=0
+      fi
+    else
+      if run git checkout -B "\$REQUIRED_BRANCH" "origin/\$REQUIRED_BRANCH"; then
+        log "creada rama local \$REQUIRED_BRANCH desde origin/\$REQUIRED_BRANCH"
+      else
+        log "⚠ [\$LB] no existe rama local '\$REQUIRED_BRANCH' ni se pudo crear desde origin (ver log); se queda en '\$branch'."
+        synced=0
+      fi
+    fi
+  fi
+fi
+
+if [ "\$synced" -eq 1 ]; then
+  if run git pull --ff-only origin "\$REQUIRED_BRANCH"; then
+    log "✓ rama \$REQUIRED_BRANCH actualizada"
+  else
+    log "⚠ [\$LB] git pull --ff-only falló (rama divergente o conflicto; ver log). Se deja tal cual, sin tocar nada."
+    synced=0
+  fi
+fi
+
+if [ "\$synced" -eq 1 ]; then
+  log "✓ [\$LB] sincronizado y limpio"
+else
+  log "→ [\$LB] abierto SIN sincronizar (ver motivo arriba, log: \$LOG)"
+  notify "No se sincronizó \$LB. Revisa el pane/log."
+fi
+
+log "lanzando claude…"
+claude
+echo
+echo "[\$LB] claude salió. Pane normal en: \$DIR"
+EOF
+  chmod +x "$launcher"
+  echo "$launcher"
+}
+
+ratio_for() { awk "BEGIN{printf \"%.4f\", 1/$1}"; }
+
+split_row() {
+  local parent="$1" count="$2" start="$3"
+  echo "$parent"
+  local cur="$parent" i remaining ratio resp newpane idx
+  for ((i = 1; i < count; i++)); do
+    remaining=$((count - i + 1))
+    ratio="$(ratio_for "$remaining")"
+    idx=$((start + i))
+    resp="$(herdr pane split "$cur" --direction right --ratio "$ratio" --cwd "${dirs[$idx]}" --no-focus)" \
+      || { echo "✗ no se pudo dividir el pane para '${labels[$idx]}'" >&2; exit 1; }
+    newpane="$(jq -r '.result.pane.pane_id' <<<"$resp")"
+    echo "$newpane"
+    cur="$newpane"
+  done
+}
+
+echo "creando space '$WS_LABEL' con ${n} pane(s)…"
+ws_json="$(herdr workspace create --cwd "${dirs[0]}" --label "$WS_LABEL" --no-focus)" \
+  || { echo "✗ herdr workspace create falló"; exit 1; }
+wsid="$(jq -r '.result.workspace.workspace_id' <<<"$ws_json")"
+p0="$(jq -r '.result.root_pane.pane_id' <<<"$ws_json")"
+
+panes=()
+if [ "$n" -eq 6 ]; then
+  resp="$(herdr pane split "$p0" --direction down --ratio 0.5 --cwd "${dirs[3]}" --no-focus)"
+  bottom="$(jq -r '.result.pane.pane_id' <<<"$resp")"
+  mapfile -t row1 < <(split_row "$p0" 3 0)
+  mapfile -t row2 < <(split_row "$bottom" 3 3)
+  panes=("${row1[@]}" "${row2[@]}")
+else
+  mapfile -t panes < <(split_row "$p0" "$n" 0)
+fi
+
+for i in "${!labels[@]}"; do
+  lb="${labels[$i]}"; dir="${dirs[$i]}"; pane="${panes[$i]}"
+  log="$LOG_DIR/${lb}.log"
+  launcher="$(make_launcher "$lb" "$dir" "$log")"
+  herdr pane rename "$pane" "$lb" >/dev/null 2>&1 || true
+  sleep 0.2
+  herdr pane run "$pane" "bash $launcher" >/dev/null || echo "  ⚠ no se pudo lanzar en '$lb' ($pane)"
+  echo "  $lb → $dir (pane $pane)"
+done
+
+herdr workspace focus "$wsid" >/dev/null 2>&1 || true
+echo "▶ space '$WS_LABEL' listo (modo seguro) con ${#panes[@]} pane(s). Logs en: $LOG_DIR"

@@ -23,6 +23,10 @@ auto_switch = false
 # agentes corriendo en paralelo.
 agent_panel_sort = "priority"
 
+# Sin espacio extra entre panes: comparten el borde divisor en vez de tener
+# un gap visual. Máximo aprovechamiento de pantalla en splits.
+pane_gaps = false
+
 [ui.toast]
 # Sin notificaciones pop-up (ni in-app ni del sistema). El estado de cada
 # agente ya se ve en el sidebar; los toasts no aportan aquí y distraen.

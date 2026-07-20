@@ -53,6 +53,7 @@ con todas las opciones disponibles, comentadas):
 | `theme.name` | `gruvbox` | oscuro, buen contraste, colores tierra — cómodo en sesiones largas |
 | `theme.auto_switch` | `false` | tema fijo manualmente; no depende del modo claro/oscuro del terminal host (así se ve igual en todas las máquinas) |
 | `ui.agent_panel_sort` | `priority` | el sidebar ordena por quién necesita atención, no por workspace — importa cuando hay varios agentes corriendo en paralelo |
+| `ui.pane_gaps` | `false` | sin espacio extra entre panes al hacer split: comparten el borde divisor, máximo aprovechamiento de pantalla |
 | `ui.toast.delivery` | `off` | sin pop-ups; el estado de cada agente ya se ve en el sidebar |
 | `keys.switch_workspace` | `prefix+shift+1..9` | cambia de workspace directo por índice, sin abrir el picker (`prefix+w`) |
 

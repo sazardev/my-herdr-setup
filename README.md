@@ -56,6 +56,8 @@ con todas las opciones disponibles, comentadas):
 | `ui.pane_gaps` | `false` | sin espacio extra entre panes al hacer split: comparten el borde divisor, máximo aprovechamiento de pantalla |
 | `ui.toast.delivery` | `off` | sin pop-ups; el estado de cada agente ya se ve en el sidebar |
 | `keys.switch_workspace` | `prefix+shift+1..9` | cambia de workspace directo por índice, sin abrir el picker (`prefix+w`) |
+| `keys.focus_pane_*` | `prefix+←↓↑→` | moverse entre panes con flechas; deja `h/j/k/l` libres |
+| `keys.command` (×4) | `prefix+h/j/k/l` → `herdr pane focus --direction ...` | re-bindea hjkl al mismo foco por dirección, así **ambos** esquemas (flechas y hjkl) funcionan a la vez |
 
 Para validar el archivo después de editarlo: `herdr config check`.
 Para aplicar cambios sin reiniciar herdr: `herdr server reload-config`.

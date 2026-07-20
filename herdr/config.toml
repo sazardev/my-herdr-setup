@@ -36,3 +36,33 @@ delivery = "off"
 # prefix+shift+1..9 cambia de workspace directo por índice, sin pasar por
 # el workspace picker (prefix+w).
 switch_workspace = "prefix+shift+1..9"
+
+# Moverse entre panes con las flechas además de hjkl (foco por dirección).
+focus_pane_left = "prefix+left"
+focus_pane_down = "prefix+down"
+focus_pane_up = "prefix+up"
+focus_pane_right = "prefix+right"
+
+# hjkl quedan libres al reasignar focus_pane_* arriba, así que se re-bindean
+# aquí como comandos custom hacia la misma acción de foco (mismo comando que
+# usa `herdr pane focus` internamente). Resultado: flechas y hjkl funcionan
+# ambos para moverse entre panes.
+[[keys.command]]
+key = "prefix+h"
+type = "shell"
+command = "herdr pane focus --direction left --current"
+
+[[keys.command]]
+key = "prefix+j"
+type = "shell"
+command = "herdr pane focus --direction down --current"
+
+[[keys.command]]
+key = "prefix+k"
+type = "shell"
+command = "herdr pane focus --direction up --current"
+
+[[keys.command]]
+key = "prefix+l"
+type = "shell"
+command = "herdr pane focus --direction right --current"

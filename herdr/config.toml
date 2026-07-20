@@ -21,11 +21,15 @@ auto_switch = false
 # Ordena el panel de agentes por prioridad de atención (quién necesita
 # respuesta) en vez de agrupar por espacio/workspace. Útil con varios
 # agentes corriendo en paralelo.
-agent_panel_sort = "priority"
+agent_panel_sort = "spaces"
 
 # Sin espacio extra entre panes: comparten el borde divisor en vez de tener
 # un gap visual. Máximo aprovechamiento de pantalla en splits.
 pane_gaps = false
+
+# Línea de borde alrededor de los panes: con pane_gaps en false, esta línea
+# queda como único divisor visible entre paneles (sin gap extra).
+pane_borders = true
 
 [ui.toast]
 # Sin notificaciones pop-up (ni in-app ni del sistema). El estado de cada

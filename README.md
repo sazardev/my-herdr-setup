@@ -16,6 +16,7 @@ scripts/herdr-workspace       arma un grid de panes y lanza Claude en cada uno
 scripts/herdr-workspace-safe  igual, pero nunca descarta cambios sin commitear
 scripts/list.conf.example     plantilla de la lista de proyectos/clones
 install.sh                    symlinks + reload, para instalar en una máquina nueva
+provisioning/                 setup de máquina nueva (Windows host + CachyOS-WSL) para gm-erp2
 ```
 
 ## Instalación en una máquina nueva
@@ -188,6 +189,54 @@ Private/Domain por default, no expone nada a internet mientras no se
 configure port forwarding en el router). Para acceso desde fuera de la
 LAN (datos móviles), preferir una VPN tipo Tailscale antes que abrir el
 puerto 22 directo al router.
+
+## Provisioning de máquina nueva (Windows host + CachyOS-WSL)
+
+`provisioning/` trae los dos scripts usados para armar una VM nueva desde
+cero para el proyecto **gm-erp2** (Node/pnpm/Turborepo, Docker nativo,
+toolchain de Go, stack de zsh, herdr, etc.). Son idempotentes (se pueden
+re-correr sin romper nada), no abortan al primer error (reportan y siguen)
+y terminan con una tabla resumen + log en disco.
+
+```
+provisioning/windows-host-setup.ps1   Windows, admin: features de WSL, Nerd Fonts,
+                                       imagen de CachyOS-WSL, .wslconfig, Alacritty,
+                                       Claude Code nativo en Windows
+provisioning/cachyos-provision.sh     Dentro de CachyOS: paquetes (pacman/AUR/go),
+                                       stack de zsh, Docker, git/gh, zram+swapfile,
+                                       este mismo repo de herdr, dotfiles
+```
+
+Orden de uso:
+
+```powershell
+# 1) En el host Windows, PowerShell (se auto-eleva a admin):
+.\provisioning\windows-host-setup.ps1
+```
+
+```bash
+# 2) Ya dentro de CachyOS-WSL, como el usuario normal (no root):
+chmod +x provisioning/cachyos-provision.sh
+./provisioning/cachyos-provision.sh --dotfiles-repo <url-tus-dotfiles> --herdr-binary <ruta-al-binario-si-lo-tienes>
+```
+
+Notas:
+
+- El `.wslconfig` que escribe el script de Windows pone `swap=0GB` **a
+  propósito**: todo el swap real (zram + swapfile en disco) se gestiona
+  dentro de CachyOS por `cachyos-provision.sh`, para no duplicar swap en
+  dos capas.
+- `cachyos-provision.sh` clona y corre el `install.sh` de este mismo repo
+  (`my-herdr-setup`), así que al terminar ya quedan armados `hw`/`hws`
+  (una vez que también tengas tu `.zshrc` con esos aliases, vía
+  `--dotfiles-repo`).
+- El binario `herdr` en sí y el repo de dotfiles personales no se pueden
+  descargar de un origen público — pásalos por parámetro
+  (`--herdr-binary`, `--dotfiles-repo`) o el script deja instrucciones
+  para hacerlo a mano.
+- Algunos nombres de paquete AUR (`usql`, `grpcurl`, `azure-cli`,
+  `httpie`) están marcados como "verificar" en el script — confírmalos
+  con `yay -Ss <nombre>` la primera vez que lo corras en una máquina real.
 
 ## Qué NO está en este repo (a propósito)
 

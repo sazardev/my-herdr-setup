@@ -8,6 +8,49 @@ tenerlo unificado e idéntico en todas mis máquinas (Linux, WSL, macOS).
 > (Claude Code, Codex, opencode, etc.): sidebar de agentes, workspaces,
 > panes con split, y una API por socket para automatizarlo.
 
+## 🚀 Quick start — VM nueva de un jalón (copy-paste, sin clonar nada)
+
+Arma una VM nueva completa para **gm-erp2** (Windows host + CachyOS-WSL)
+pegando estas dos líneas, una por máquina. No hace falta `git clone` de
+este repo primero — cada script se descarga y ejecuta directo desde
+GitHub (más detalle en [Provisioning](#provisioning-de-máquina-nueva-windows-host--cachyos-wsl)).
+
+**1) Windows (PowerShell, se auto-eleva a admin):**
+
+```powershell
+iwr -useb "https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/windows-host-setup.ps1" -OutFile "$env:TEMP\windows-host-setup.ps1"; & "$env:TEMP\windows-host-setup.ps1"
+```
+
+**2) Ya dentro de CachyOS-WSL (bash, usuario normal, no root):**
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/cachyos-provision.sh)
+```
+
+Con parámetros (token de GitHub, dotfiles, binario de herdr, rama de
+gm-erp2 — todos opcionales):
+
+```bash
+GH_TOKEN=ghp_xxx bash <(curl -fsSL https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/cachyos-provision.sh) \
+  --dotfiles-repo <url-tus-dotfiles> \
+  --herdr-binary <ruta-al-binario-si-lo-tienes> \
+  --gm-erp2-branch dev
+```
+
+`GH_TOKEN` es opcional: si no lo exportas, el script cae al flujo
+interactivo normal de `gh auth login` (URL + código de un solo uso). Sin
+autenticar, el clone de `gm-erp2` falla si el repo es privado.
+
+**Nota de seguridad**: esto ejecuta contenido remoto sin revisarlo primero
+— razonable porque es tu propio repo, pero si prefieres auditar antes de
+correr, descarga el archivo y ábrelo (`iwr ... -OutFile` / `curl -fsSL ...
+-o script.sh`) antes de ejecutarlo, en vez del one-liner combinado.
+
+Qué hace cada script, parámetros completos, y todo lo que NO se puede
+automatizar (dotfiles personales, binario de herdr, etc.): ver
+[Provisioning de máquina nueva](#provisioning-de-máquina-nueva-windows-host--cachyos-wsl)
+más abajo.
+
 ## Contenido
 
 ```
@@ -233,47 +276,8 @@ interactivo normal de `gh auth login` (te da una URL + código de un solo
 uso para pegar en el navegador). Sin autenticar, el clone de `gm-erp2`
 falla si el repo es privado.
 
-### Uso rápido sin clonar el repo (copy-paste, una sola línea)
-
-Para una VM nueva no hace falta `git clone` de este repo primero — cada
-script se descarga y ejecuta directo desde GitHub. `cachyos-provision.sh`
-clona este mismo repo por su cuenta más adelante (paso `herdr_setup`), así
-que igual termina presente en disco.
-
-**Windows (PowerShell, se auto-eleva a admin):**
-
-```powershell
-iwr -useb "https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/windows-host-setup.ps1" -OutFile "$env:TEMP\windows-host-setup.ps1"; & "$env:TEMP\windows-host-setup.ps1"
-```
-
-Con parámetros (mismos nombres que corriéndolo local):
-
-```powershell
-& "$env:TEMP\windows-host-setup.ps1" -CachyOSUsername omar -WslMemoryGB 20 -WslProcessors 18
-```
-
-**CachyOS-WSL (bash, como el usuario normal, no root):**
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/cachyos-provision.sh)
-```
-
-Con parámetros (van después, tal cual los del uso normal):
-
-```bash
-GH_TOKEN=ghp_xxx bash <(curl -fsSL https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/cachyos-provision.sh) \
-  --dotfiles-repo <url-tus-dotfiles> \
-  --herdr-binary <ruta-al-binario-si-lo-tienes> \
-  --gm-erp2-branch dev
-```
-
-**Nota de seguridad**: esto ejecuta contenido remoto sin revisarlo primero
-— razonable porque es tu propio repo, pero si prefieres auditar antes de
-correr, descarga el archivo y ábrelo (`iwr ... -OutFile` / `curl -fsSL ...
--o script.sh`) antes del `& script.ps1` / `bash script.sh`, en vez del
-one-liner combinado.
-
-Notas:
+El copy-paste de una sola línea para no clonar nada primero está hasta
+arriba de este README, en **Quick start**. Notas:
 
 - El `.wslconfig` que escribe el script de Windows pone `swap=0GB` **a
   propósito**: todo el swap real (zram + swapfile en disco) se gestiona

@@ -37,10 +37,11 @@ pane_borders = true
 # se pueden seguir creando con el keybinding configurado (prefix+c).
 hide_tab_bar_when_single_tab = true
 
+show_agent_labels_on_pane_borders = true
 [ui.toast]
 # Sin notificaciones pop-up (ni in-app ni del sistema). El estado de cada
 # agente ya se ve en el sidebar; los toasts no aportan aquí y distraen.
-delivery = "off"
+delivery = "herdr"
 
 [keys]
 # prefix+shift+1..9 cambia de workspace directo por índice, sin pasar por

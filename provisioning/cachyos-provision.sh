@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # cachyos-provision.sh — provisioning idempotente del entorno gm-erp2 dentro de CachyOS-WSL
-# Version: 1.0.0
+# Version: 1.1.0
 # Uso:
 #   ./cachyos-provision.sh
+#   GH_TOKEN=ghp_xxx ./cachyos-provision.sh          # gh auth login no interactivo
 #   ./cachyos-provision.sh --dotfiles-repo https://github.com/tuusuario/dotfiles.git
 #   ./cachyos-provision.sh --herdr-binary /mnt/c/temp/herdr
+#   ./cachyos-provision.sh --gm-erp2-repo https://github.com/erpv2/gm-erp2.git --gm-erp2-branch dev
 #   ./cachyos-provision.sh --only zram_swap
 
 set -uo pipefail  # sin -e: los pasos se controlan explícitamente para no abortar todo el script
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 DOTFILES_REPO=""
 HERDR_BINARY=""
 ONLY=""
@@ -20,12 +22,23 @@ EXPECTED_SWAP_GB=13
 ZRAM_SIZE_MB=5907
 DISK_SWAP_GB=8
 
+# repos propios reales (verificados: tienen remote en GitHub)
+NVIM_SETUP_REPO="https://github.com/sazardev/my-nvim-setup.git"
+HERDR_SETUP_REPO="https://github.com/sazardev/my-herdr-setup.git"
+
+# gm-erp2: default tomado del remote real ya clonado en la máquina de referencia
+GM_ERP2_REPO="https://github.com/erpv2/gm-erp2.git"
+GM_ERP2_BRANCH="dev"
+GM_ERP2_DIR="$HOME/dev/gm-erp2"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dotfiles-repo) DOTFILES_REPO="$2"; shift 2 ;;
-    --herdr-binary)  HERDR_BINARY="$2"; shift 2 ;;
-    --only)          ONLY="$2"; shift 2 ;;
-    --force)         FORCE=1; shift ;;
+    --dotfiles-repo)  DOTFILES_REPO="$2"; shift 2 ;;
+    --herdr-binary)   HERDR_BINARY="$2"; shift 2 ;;
+    --gm-erp2-repo)   GM_ERP2_REPO="$2"; shift 2 ;;
+    --gm-erp2-branch) GM_ERP2_BRANCH="$2"; shift 2 ;;
+    --only)           ONLY="$2"; shift 2 ;;
+    --force)          FORCE=1; shift ;;
     *) echo "Argumento desconocido: $1"; exit 2 ;;
   esac
 done
@@ -140,13 +153,26 @@ step_base_packages() {
 }
 
 step_aur_packages() {
-  # nombres exactos verifícalos con `yay -Ss <nombre>` si alguno falla: pueden variar entre AUR/community
-  yay -S --needed --noconfirm \
-    cachyos-zsh-config github-cli lazydocker gitleaks azure-cli usql grpcurl 2>&1 | tee -a "$LOG_FILE"
+  # instalación paquete-por-paquete: si uno falla, no se aborta el resto (solo se marca el step como FAIL al final)
+  local pkgs=(cachyos-zsh-config github-cli lazydocker gitleaks azure-cli usql grpcurl resterm)
+  local all_ok=1
+  for p in "${pkgs[@]}"; do
+    if pacman -Qi "$p" &>/dev/null; then
+      log_info "  AUR: $p ya instalado"
+      continue
+    fi
+    if yay -S --needed --noconfirm "$p" &>>"$LOG_FILE"; then
+      log_ok "  AUR: $p"
+    else
+      log_warn "  AUR: $p falló — nombre incierto, verifica con 'yay -Ss $p'"
+      all_ok=0
+    fi
+  done
+  [[ $all_ok -eq 1 ]]
 }
 
 step_node_globals() {
-  sudo npm install -g pnpm node-gyp @anthropic-ai/claude-code
+  sudo npm install -g pnpm node-gyp corepack @anthropic-ai/claude-code
 }
 
 step_go_tools() {
@@ -158,8 +184,10 @@ step_go_tools() {
   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
   go install github.com/bufbuild/buf/cmd/buf@latest
   go install github.com/evilmartians/lefthook@latest
-  # lazyazure / portainer-tui: confirma el import path real que usabas antes de correr esto en serio
-  log_warn "  lazyazure y portainer-tui: confirma el import path exacto antes de instalar (se omiten por defecto)"
+  # lazyazure / portainer-tui: confirma el import path real antes de descomentar
+  # go install github.com/<owner>/lazyazure@latest
+  # go install github.com/<owner>/portainer-tui@latest
+  log_warn "  lazyazure y portainer-tui: confirma el import path exacto (se omiten por defecto)"
   grep -q 'GOPATH/bin' ~/.zshrc 2>/dev/null || echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.zshrc
 }
 
@@ -195,9 +223,42 @@ step_git_config() {
   git config --global init.defaultBranch main
   git config --global credential.helper "!gh auth git-credential"
   bin_missing gh && { log_err "gh no instalado, saltando gh extensions"; return 1; }
-  for ext in dlvhdr/gh-dash seachicken/gh-poi meiji163/gh-notify kudohamu/gh-graph; do
-    gh extension list 2>/dev/null | grep -q "$ext" || gh extension install "$ext" || log_warn "  no se pudo instalar extensión $ext"
+
+  local gh_extensions=(
+    "dlvhdr/gh-dash"
+    "seachicken/gh-poi"
+    "meiji163/gh-notify"
+    "kudohamu/gh-graph"
+  )
+  local all_ok=1
+  for ext in "${gh_extensions[@]}"; do
+    gh extension list 2>/dev/null | grep -q "$ext" && continue
+    if gh extension install "$ext" &>>"$LOG_FILE"; then
+      log_ok "  gh extension: $ext"
+    else
+      log_warn "  gh extension $ext falló"
+      all_ok=0
+    fi
   done
+  log_warn "  gh-branch NO se instala automáticamente: no hay certeza de cuál es el repo real en GitHub." \
+           " Corre 'gh extension search branch' tú mismo, confirma el owner/repo y agrégalo al array" \
+           " gh_extensions de este script."
+  [[ $all_ok -eq 1 ]]
+}
+
+step_gh_auth() {
+  bin_missing gh && { log_err "gh no instalado"; return 1; }
+  if gh auth status &>/dev/null; then
+    log_info "  gh ya autenticado"
+    return 0
+  fi
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    echo "$GH_TOKEN" | gh auth login --with-token
+  else
+    log_warn "  gh no autenticado y no hay GH_TOKEN en el entorno — sigue el flujo interactivo (URL + código de un solo uso)"
+    gh auth login -h github.com -p https -w
+  fi
+  gh auth status &>/dev/null
 }
 
 step_zram_and_swap() {
@@ -238,12 +299,13 @@ step_validate_resources() {
 }
 
 step_herdr_setup() {
-  if [[ ! -d "$HOME/.local/share/my-herdr-setup" ]]; then
-    git clone https://github.com/sazardev/my-herdr-setup.git "$HOME/.local/share/my-herdr-setup"
+  local dest="$HOME/.local/share/my-herdr-setup"
+  if [[ ! -d "$dest/.git" ]]; then
+    git clone "$HERDR_SETUP_REPO" "$dest"
   else
-    git -C "$HOME/.local/share/my-herdr-setup" pull --ff-only || true
+    git -C "$dest" pull --ff-only || true
   fi
-  (cd "$HOME/.local/share/my-herdr-setup" && ./install.sh)
+  (cd "$dest" && ./install.sh)
 
   if [[ -n "$HERDR_BINARY" && -f "$HERDR_BINARY" ]]; then
     mkdir -p "$HOME/.local/bin"
@@ -255,9 +317,64 @@ step_herdr_setup() {
   fi
 }
 
+step_nvim_setup() {
+  local dest="$HOME/personal/my-nvim-setup"
+  mkdir -p "$HOME/personal"
+  if [[ ! -d "$dest/.git" ]]; then
+    git clone "$NVIM_SETUP_REPO" "$dest"
+  else
+    git -C "$dest" pull --ff-only || true
+  fi
+  if [[ ! -d "$dest/nvim" ]]; then
+    log_err "  $dest no trae carpeta nvim/ — revisa el repo"
+    return 1
+  fi
+  if [[ -e "$HOME/.config/nvim" && ! -L "$HOME/.config/nvim" ]]; then
+    mv "$HOME/.config/nvim" "$HOME/.config/nvim.bak.$(date +%s)"
+    log_warn "  ~/.config/nvim existente respaldado como .bak"
+  fi
+  ln -sfn "$dest/nvim" "$HOME/.config/nvim"
+}
+
+step_clone_gm_erp2() {
+  mkdir -p "$HOME/dev"
+  if [[ -z "$GM_ERP2_REPO" ]]; then
+    log_err "  --gm-erp2-repo vacío"
+    return 1
+  fi
+  if [[ ! -d "$GM_ERP2_DIR/.git" ]]; then
+    git clone --branch "$GM_ERP2_BRANCH" "$GM_ERP2_REPO" "$GM_ERP2_DIR" 2>>"$LOG_FILE" \
+      || git clone "$GM_ERP2_REPO" "$GM_ERP2_DIR"
+  else
+    git -C "$GM_ERP2_DIR" fetch --all
+    git -C "$GM_ERP2_DIR" checkout "$GM_ERP2_BRANCH"
+    git -C "$GM_ERP2_DIR" pull --ff-only
+  fi
+}
+
+step_gm_erp2_deps() {
+  [[ -d "$GM_ERP2_DIR/.git" ]] || { log_err "  gm-erp2 no está clonado, saltando pnpm install"; return 1; }
+  (
+    cd "$GM_ERP2_DIR" || exit 1
+    export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+    corepack enable 2>&1 | tee -a "$LOG_FILE"
+    pnpm install
+  )
+}
+
+step_gm_erp2_hooks() {
+  [[ -d "$GM_ERP2_DIR/.git" ]] || return 1
+  (cd "$GM_ERP2_DIR" && lefthook install)
+}
+
+step_gm_erp2_playwright() {
+  [[ -d "$GM_ERP2_DIR/.git" ]] || return 1
+  (cd "$GM_ERP2_DIR" && pnpm exec playwright install --with-deps)
+}
+
 step_dotfiles() {
   if [[ -z "$DOTFILES_REPO" ]]; then
-    log_warn "  --dotfiles-repo no provisto — restaura manualmente .zshrc, .zshrc.d, .gitconfig, nvim config"
+    log_warn "  --dotfiles-repo no provisto — restaura manualmente .zshrc, .zshrc.d, .gitconfig"
     return 0
   fi
   local dest="$HOME/.local/share/dotfiles"
@@ -279,6 +396,10 @@ step_final_report() {
   go version 2>/dev/null | xargs -I{} log_info "  go: {}"
   docker --version 2>/dev/null | xargs -I{} log_info "  docker: {}"
   claude --version 2>/dev/null | xargs -I{} log_info "  claude: {}"
+  gh --version 2>/dev/null | head -1 | xargs -I{} log_info "  {}"
+  log_info "  gm-erp2 en: $GM_ERP2_DIR (rama $GM_ERP2_BRANCH)"
+  log_info "  Pendiente manual: 'cd $GM_ERP2_DIR && docker compose up -d' para levantar mongo/redis"
+  log_info "  Pendiente manual: cierra sesión y vuelve a entrar para que el grupo 'docker' tome efecto"
   return 0
 }
 
@@ -297,9 +418,15 @@ run_step "go_tools"                 step_go_tools
 run_step "zsh_stack"                step_zsh_stack
 run_step "docker_setup"             step_docker_setup
 run_step "git_config"               step_git_config
+run_step "gh_auth"                  step_gh_auth
 run_step "zram_swap"                step_zram_and_swap
 run_step "validate_resources"       step_validate_resources
 run_step "herdr_setup"              step_herdr_setup
+run_step "nvim_setup"               step_nvim_setup
+run_step "clone_gm_erp2"            step_clone_gm_erp2
+run_step "gm_erp2_deps"             step_gm_erp2_deps
+run_step "gm_erp2_hooks"            step_gm_erp2_hooks
+run_step "gm_erp2_playwright"       step_gm_erp2_playwright
 run_step "dotfiles"                 step_dotfiles
 run_step "final_report"             step_final_report
 

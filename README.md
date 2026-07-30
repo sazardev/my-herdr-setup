@@ -194,17 +194,22 @@ puerto 22 directo al router.
 
 `provisioning/` trae los dos scripts usados para armar una VM nueva desde
 cero para el proyecto **gm-erp2** (Node/pnpm/Turborepo, Docker nativo,
-toolchain de Go, stack de zsh, herdr, etc.). Son idempotentes (se pueden
-re-correr sin romper nada), no abortan al primer error (reportan y siguen)
-y terminan con una tabla resumen + log en disco.
+toolchain de Go, stack de zsh, herdr, nvim, Alacritty, etc.). Son
+idempotentes (se pueden re-correr sin romper nada), no abortan al primer
+error (reportan y siguen) y terminan con una tabla resumen + log en disco.
 
 ```
-provisioning/windows-host-setup.ps1   Windows, admin: features de WSL, Nerd Fonts,
-                                       imagen de CachyOS-WSL, .wslconfig, Alacritty,
-                                       Claude Code nativo en Windows
+provisioning/windows-host-setup.ps1   Windows, admin: features de WSL, Nerd Fonts
+                                       (JetBrainsMono), imagen de CachyOS-WSL,
+                                       .wslconfig, Alacritty (config real de
+                                       sazardev/my-alacritty-setup), Claude Code
+                                       nativo en Windows
 provisioning/cachyos-provision.sh     Dentro de CachyOS: paquetes (pacman/AUR/go),
-                                       stack de zsh, Docker, git/gh, zram+swapfile,
-                                       este mismo repo de herdr, dotfiles
+                                       stack de zsh, Docker, git/gh + gh auth login,
+                                       zram+swapfile, este mismo repo de herdr,
+                                       sazardev/my-nvim-setup, clone de gm-erp2 +
+                                       pnpm install + lefthook install + playwright
+                                       install, dotfiles
 ```
 
 Orden de uso:
@@ -217,8 +222,16 @@ Orden de uso:
 ```bash
 # 2) Ya dentro de CachyOS-WSL, como el usuario normal (no root):
 chmod +x provisioning/cachyos-provision.sh
-./provisioning/cachyos-provision.sh --dotfiles-repo <url-tus-dotfiles> --herdr-binary <ruta-al-binario-si-lo-tienes>
+GH_TOKEN=ghp_xxx ./provisioning/cachyos-provision.sh \
+  --dotfiles-repo <url-tus-dotfiles> \
+  --herdr-binary <ruta-al-binario-si-lo-tienes> \
+  --gm-erp2-branch dev
 ```
+
+`GH_TOKEN` es opcional: si no lo exportas, el paso `gh_auth` cae al flujo
+interactivo normal de `gh auth login` (te da una URL + código de un solo
+uso para pegar en el navegador). Sin autenticar, el clone de `gm-erp2`
+falla si el repo es privado.
 
 Notas:
 
@@ -230,13 +243,31 @@ Notas:
   (`my-herdr-setup`), así que al terminar ya quedan armados `hw`/`hws`
   (una vez que también tengas tu `.zshrc` con esos aliases, vía
   `--dotfiles-repo`).
-- El binario `herdr` en sí y el repo de dotfiles personales no se pueden
-  descargar de un origen público — pásalos por parámetro
-  (`--herdr-binary`, `--dotfiles-repo`) o el script deja instrucciones
-  para hacerlo a mano.
+- También clona `sazardev/my-nvim-setup` y symlinkea `nvim/` a
+  `~/.config/nvim` automáticamente (respaldando cualquier config previa).
+- El script de Windows instala la config real de Alacritty desde
+  `sazardev/my-alacritty-setup` (fuente `JetBrainsMono NFM`, tema
+  Gruvbox) en vez de una genérica — parchea `local.toml` para que el
+  nombre de distro coincida (`cachyos` en minúsculas).
+- `cachyos-provision.sh` clona `gm-erp2` (default:
+  `https://github.com/erpv2/gm-erp2.git`, rama `dev`), corre
+  `corepack enable && pnpm install`, `lefthook install` y
+  `pnpm exec playwright install --with-deps` — el repo queda listo para
+  trabajar, no solo el sistema operativo alrededor.
+- El binario `herdr` en sí y el repo de dotfiles personales (`.zshrc`,
+  `.gitconfig`) no se pueden descargar de un origen público — pásalos por
+  parámetro (`--herdr-binary`, `--dotfiles-repo`) o el script deja
+  instrucciones para hacerlo a mano.
+- `my-fastfetch-setup` no tiene remote en GitHub (solo existe local en la
+  máquina de referencia) — no hay forma de automatizarlo hasta que lo
+  publiques.
 - Algunos nombres de paquete AUR (`usql`, `grpcurl`, `azure-cli`,
-  `httpie`) están marcados como "verificar" en el script — confírmalos
-  con `yay -Ss <nombre>` la primera vez que lo corras en una máquina real.
+  `httpie`, `resterm`) están marcados como "verificar" en el script —
+  confírmalos con `yay -Ss <nombre>` la primera vez que lo corras en una
+  máquina real. Lo mismo para la extensión `gh-branch` (no se instala:
+  no hay certeza de cuál es el repo real en GitHub) y para
+  `lazyazure`/`portainer-tui` (`go install`, comentados hasta confirmar
+  el import path).
 
 ## Qué NO está en este repo (a propósito)
 

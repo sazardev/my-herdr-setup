@@ -4,7 +4,7 @@
   Provisioning idempotente del host Windows para gm-erp2:
   features de WSL, Nerd Fonts, CachyOS-WSL, .wslconfig, Alacritty, Claude Code (Windows).
 
-  Version: 1.0.0
+  Version: 1.1.0
   Uso:
     .\windows-host-setup.ps1
     .\windows-host-setup.ps1 -Force                  # re-ejecuta todos los pasos aunque ya estén hechos
@@ -16,7 +16,7 @@
 param(
     [string]   $CachyOSUsername   = "omar",
     [SecureString] $CachyOSPassword,
-    [string[]] $NerdFonts         = @("CascadiaCode", "Meslo"),
+    [string[]] $NerdFonts         = @("JetBrainsMono"),
     [int]      $WslMemoryGB       = 20,
     [int]      $WslProcessors     = 18,
     [int]      $WslSwapGB         = 0,   # 0 a propósito: el swap real vive dentro de CachyOS (provision-cachyos.sh)
@@ -25,7 +25,7 @@ param(
     [switch]   $InstallClaudeOnWindows = $true
 )
 
-$Script:Version   = "1.0.0"
+$Script:Version   = "1.1.0"
 $Script:StateDir  = Join-Path $env:ProgramData "gm-erp2-setup"
 $Script:StateFile = Join-Path $Script:StateDir "state.json"
 $Script:LogDir    = Join-Path $Script:StateDir "logs"
@@ -274,26 +274,37 @@ function Step-InstallAlacritty {
         winget install --id Alacritty.Alacritty -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
     }
 
-    $cfgDir  = Join-Path $env:APPDATA "alacritty"
-    $cfgPath = Join-Path $cfgDir "alacritty.toml"
+    # Config real versionada (sazardev/my-alacritty-setup), no una genérica inventada:
+    # JetBrainsMono NFM, tema Gruvbox, keybindings de zoom/maximize/shift+enter, etc.
+    $tmp = Join-Path $env:TEMP "gm-erp2-alacritty-setup"
+    if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $zipPath = Join-Path $tmp "repo.zip"
+    Invoke-WebRequest -Uri "https://github.com/sazardev/my-alacritty-setup/archive/refs/heads/main.zip" -OutFile $zipPath
+    Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
+    $repoDir = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like "my-alacritty-setup-*" } | Select-Object -First 1
+    if (-not $repoDir) { throw "No se pudo extraer sazardev/my-alacritty-setup" }
+
+    $cfgDir = Join-Path $env:APPDATA "alacritty"
     New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
-    if (Test-Path $cfgPath) { Copy-Item $cfgPath "$cfgPath.bak.$([int](Get-Date -UFormat %s))" -Force }
+    foreach ($f in @("alacritty.toml", "local.toml")) {
+        $src = Join-Path $repoDir.FullName $f
+        $dst = Join-Path $cfgDir $f
+        if (Test-Path $dst) { Copy-Item $dst "$dst.bak.$([int](Get-Date -UFormat %s))" -Force }
+        Copy-Item $src $dst -Force
+    }
+    $themesSrc = Join-Path $repoDir.FullName "themes"
+    if (Test-Path $themesSrc) { Copy-Item $themesSrc $cfgDir -Recurse -Force }
 
-    $primaryFont = $NerdFonts[0]
-    $config = @"
-[shell]
-program = "wsl.exe"
-args = ["-d", "cachyos"]
+    # el repo asume el nombre de distro "CachyOS"; nuestra instalación la registró en minúsculas ("cachyos")
+    $localTomlPath = Join-Path $cfgDir "local.toml"
+    if (Test-Path $localTomlPath) {
+        (Get-Content $localTomlPath -Raw) -replace '"CachyOS"', '"cachyos"' | Set-Content $localTomlPath -Encoding UTF8
+    }
 
-[font.normal]
-family = "$primaryFont Nerd Font"
-
-[font]
-size = 11
-"@
-    Set-Content -Path $cfgPath -Value $config -Encoding UTF8
     $ver = & alacritty --version 2>$null
-    Write-Log "  Alacritty instalado: $ver ; config en $cfgPath" "OK"
+    Write-Log "  Alacritty instalado: $ver ; config real de sazardev/my-alacritty-setup en $cfgDir" "OK"
+    Write-Log "  Verifica que la fuente 'JetBrainsMono NFM' quedó registrada (ver README del repo para el chequeo con System.Drawing)" "INFO"
 }
 
 function Step-InstallClaudeWindows {

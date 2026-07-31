@@ -72,6 +72,40 @@ function Save-State($state) {
 }
 $Script:State = Get-State
 
+# ---------- helpers de ejecución/diagnóstico ----------
+function Invoke-LoggedNative {
+    # Corre un comando nativo, loguea cada línea de su salida (stdout+stderr) con un prefijo
+    # y lanza si el exit code no es 0. Evita los "| Out-Null" que ocultan fallas silenciosas.
+    param(
+        [Parameter(Mandatory)][string]$Prefix,
+        [Parameter(Mandatory)][scriptblock]$Command,
+        [switch]$IgnoreExitCode
+    )
+    Write-Log "  >> $Prefix" "INFO"
+    $output = & $Command 2>&1
+    $code = $LASTEXITCODE
+    if ($null -eq $output -or $output.Count -eq 0) {
+        Write-Log "    [$Prefix] (sin salida)" "INFO"
+    } else {
+        $output | ForEach-Object { Write-Log "    [$Prefix] $_" "INFO" }
+    }
+    Write-Log "  << $Prefix (exit code: $code)" "INFO"
+    if (-not $IgnoreExitCode -and $code -ne 0) {
+        throw "$Prefix terminó con exit code $code"
+    }
+    return $output
+}
+
+function Get-CachyDistroName {
+    # WSL registra el nombre tal cual viene del paquete .wsl (p.ej. "CachyOS"), no necesariamente
+    # en minúsculas. Buscamos el nombre real registrado en vez de asumir "cachyos" a pelo.
+    $names = (wsl -l -q 2>$null) | ForEach-Object { $_ -replace "`0","" } | Where-Object { $_ -ne "" }
+    Write-Log "  Distros registradas actualmente: $($names -join ', ')" "INFO"
+    $match = $names | Where-Object { $_ -ieq "cachyos" } | Select-Object -First 1
+    if ($match) { return $match }
+    return "cachyos"
+}
+
 function Invoke-Step {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -103,30 +137,120 @@ function Invoke-Step {
 
 # ---------- pasos ----------
 
+function Step-Preflight {
+    # Diagnóstico exhaustivo del entorno ANTES de tocar nada. No decide si continuar o no,
+    # solo deja evidencia en el log de todo lo que podría explicar un fallo silencioso más
+    # adelante (permisos, virtualización deshabilitada, wsl.exe viejo, instalación corrupta previa).
+    Write-Log "===== PRE-FLIGHT: diagnóstico de entorno =====" "INFO"
+
+    try {
+        $cs = Get-ComputerInfo -Property OsName, OsBuildNumber, OsVersion, HyperVisorPresent, HyperVRequirementVirtualizationFirmwareEnabled -ErrorAction Stop
+        Write-Log "  OS: $($cs.OsName) build $($cs.OsBuildNumber) ($($cs.OsVersion))" "INFO"
+        Write-Log "  Hypervisor activo (HyperVisorPresent): $($cs.HyperVisorPresent)" "INFO"
+        Write-Log "  Virtualización habilitada en firmware: $($cs.HyperVRequirementVirtualizationFirmwareEnabled)" "INFO"
+        if ($cs.HyperVRequirementVirtualizationFirmwareEnabled -eq $false) {
+            Write-Log "  ADVERTENCIA: VT-x/AMD-V parece deshabilitado en BIOS/UEFI. WSL2 no puede arrancar la VM subyacente sin esto -- esto por sí solo puede explicar que CachyOS 'abra' una ventana pero no llegue a registrarse." "WARN"
+        }
+    } catch {
+        Write-Log "  No se pudo leer Get-ComputerInfo: $($_.Exception.Message)" "WARN"
+    }
+
+    foreach ($f in @("Microsoft-Windows-Subsystem-Linux", "VirtualMachinePlatform")) {
+        try {
+            $st = (Get-WindowsOptionalFeature -Online -FeatureName $f -ErrorAction Stop).State
+            Write-Log "  Feature '$f': $st" "INFO"
+            if ($st -ne "Enabled") {
+                Write-Log "  ADVERTENCIA: feature '$f' no está habilitada todavía; se intentará habilitar en el paso EnableWslFeatures (puede requerir reinicio)." "WARN"
+            }
+        } catch {
+            Write-Log "  No se pudo consultar feature '$f': $($_.Exception.Message)" "WARN"
+        }
+    }
+
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        Write-Log "  CRÍTICO: wsl.exe no está en PATH. WSL no está instalado en este host." "ERROR"
+    } else {
+        $verRaw = (wsl --version 2>&1) -join "`n"
+        Write-Log "  wsl --version:`n$verRaw" "INFO"
+    }
+
+    $names = (wsl -l -q 2>$null) | ForEach-Object { $_ -replace "`0","" } | Where-Object { $_ -ne "" }
+    Write-Log "  Distros reportadas por 'wsl -l -q' ahora mismo: $(if ($names) { $names -join ', ' } else { '(ninguna)' })" "INFO"
+
+    $lxssPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss"
+    if (Test-Path $lxssPath) {
+        $entries = Get-ChildItem $lxssPath -ErrorAction SilentlyContinue
+        Write-Log "  Entradas existentes en registro Lxss para este usuario: $($entries.Count)" "INFO"
+        foreach ($key in $entries) {
+            $props = Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue
+            $bp = $props.BasePath
+            $vhdOk = if ($bp -and $props.VhdFileName) { Test-Path (Join-Path $bp $props.VhdFileName) } else { $false }
+            Write-Log "    - '$($props.DistributionName)' State=$($props.State) BasePath='$bp' vhdx_existe=$vhdOk" "INFO"
+            if ($bp -and -not $vhdOk) {
+                Write-Log "  ADVERTENCIA: '$($props.DistributionName)' está en el registro pero su vhdx NO existe en disco -- instalación previa corrupta/incompleta." "WARN"
+            }
+        }
+    } else {
+        Write-Log "  No existe todavía la clave de registro Lxss para el usuario '$($env:USERNAME)' (ninguna distro registrada aún bajo este perfil)." "INFO"
+    }
+
+    foreach ($dir in @($env:LOCALAPPDATA, $env:APPDATA, $env:UserProfile, $Script:StateDir)) {
+        try {
+            $testFile = Join-Path $dir (".gm-erp2-write-test-{0}" -f (Get-Random))
+            New-Item -ItemType File -Path $testFile -Force -ErrorAction Stop | Out-Null
+            Remove-Item $testFile -Force -ErrorAction SilentlyContinue
+            Write-Log "  Permiso de escritura OK en: $dir" "INFO"
+        } catch {
+            Write-Log "  ADVERTENCIA: SIN permiso de escritura en '$dir' -- $($_.Exception.Message). Esto puede romper la descarga/instalación silenciosamente." "WARN"
+        }
+    }
+
+    try {
+        $mp = Get-MpComputerStatus -ErrorAction Stop
+        Write-Log "  Windows Defender - RealTimeProtectionEnabled: $($mp.RealTimeProtectionEnabled)" "INFO"
+    } catch {
+        Write-Log "  No se pudo consultar el estado de Windows Defender (puede haber otro antivirus activo, o no hay permisos para consultarlo)." "INFO"
+    }
+
+    try {
+        Invoke-WebRequest -Uri "https://api.github.com" -Method Head -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop | Out-Null
+        Write-Log "  Conectividad a api.github.com: OK" "INFO"
+    } catch {
+        Write-Log "  ADVERTENCIA: sin conectividad a api.github.com ($($_.Exception.Message)). Las descargas de CachyOS/Nerd Fonts/Alacritty van a fallar." "WARN"
+    }
+
+    Write-Log "===== FIN PRE-FLIGHT =====" "INFO"
+}
+
 function Step-EnableWslFeatures {
     $features = @("Microsoft-Windows-Subsystem-Linux", "VirtualMachinePlatform")
     $needsRestart = $false
     foreach ($f in $features) {
         $state = (Get-WindowsOptionalFeature -Online -FeatureName $f).State
+        Write-Log "  Feature '$f' estado actual: $state" "INFO"
         if ($state -ne "Enabled") {
+            Write-Log "  Habilitando feature '$f'..." "INFO"
             $r = Enable-WindowsOptionalFeature -Online -FeatureName $f -All -NoRestart
+            Write-Log "  Feature '$f' -> RestartNeeded=$($r.RestartNeeded)" "INFO"
             if ($r.RestartNeeded) { $needsRestart = $true }
         }
     }
     if ($needsRestart) {
         Write-Log "Se habilitaron features nuevas; puede requerir reinicio de Windows antes de continuar." "WARN"
     }
-    wsl --set-default-version 2 | Out-Null
+    Invoke-LoggedNative -Prefix "wsl --set-default-version 2" -Command { wsl --set-default-version 2 }
 }
 
 function Step-UpdateWsl {
-    wsl --update 2>&1 | Out-Null
+    Invoke-LoggedNative -Prefix "wsl --update" -Command { wsl --update } -IgnoreExitCode
     $v = wsl --version 2>&1
     Write-Log "wsl --version:`n$v" "INFO"
 }
 
 function Step-InstallNerdFonts {
+    Write-Log "  Consultando último release de ryanoasis/nerd-fonts..." "INFO"
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ryanoasis/nerd-fonts/releases/latest"
+    Write-Log "  Release encontrado: $($release.tag_name)" "INFO"
     $tmp = Join-Path $env:TEMP "gm-erp2-nerdfonts"
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 
@@ -136,7 +260,7 @@ function Step-InstallNerdFonts {
     foreach ($fontName in $NerdFonts) {
         $already = Get-ChildItem "$env:windir\Fonts" -Filter "*$fontName*" -ErrorAction SilentlyContinue
         if ($already -and -not $Force) {
-            Write-Log "  Nerd Font '$fontName' ya instalada, se omite." "INFO"
+            Write-Log "  Nerd Font '$fontName' ya instalada ($($already.Count) archivo(s) encontrados), se omite." "INFO"
             continue
         }
         $asset = $release.assets | Where-Object { $_.name -eq "$fontName.zip" }
@@ -145,10 +269,13 @@ function Step-InstallNerdFonts {
             continue
         }
         $zipPath = Join-Path $tmp "$fontName.zip"
+        Write-Log "  Descargando $($asset.browser_download_url) -> $zipPath" "INFO"
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+        Write-Log "  Descarga completa ($([Math]::Round((Get-Item $zipPath).Length / 1MB, 1)) MB), extrayendo..." "INFO"
         $extractDir = Join-Path $tmp $fontName
         Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
         $ttfs = Get-ChildItem $extractDir -Include *.ttf, *.otf -Recurse
+        Write-Log "  $($ttfs.Count) archivo(s) de fuente encontrados, copiando a $env:windir\Fonts..." "INFO"
         foreach ($f in $ttfs) {
             $fontsFolder.CopyHere($f.FullName, 0x10) # 0x10 = no dialogs
         }
@@ -156,36 +283,116 @@ function Step-InstallNerdFonts {
     }
 }
 
+function Test-CachyOSRegistered {
+    # Verdad de campo: ¿existe realmente y coincide lo que reporta 'wsl -l' con lo que hay en el registro y en disco?
+    param([switch]$Quiet)
+    $names = (wsl -l -q 2>$null) | ForEach-Object { $_ -replace "`0","" } | Where-Object { $_ -ne "" }
+    $wslMatch = $names | Where-Object { $_ -ieq "cachyos" } | Select-Object -First 1
+
+    $lxssPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss"
+    $regMatch = $null
+    $regBasePath = $null
+    $regVhdExists = $false
+    if (Test-Path $lxssPath) {
+        foreach ($key in Get-ChildItem $lxssPath -ErrorAction SilentlyContinue) {
+            $props = Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue
+            if ($props.DistributionName -ieq "cachyos") {
+                $regMatch = $props.DistributionName
+                $regBasePath = $props.BasePath
+                if ($regBasePath -and $props.VhdFileName) {
+                    $regVhdExists = Test-Path (Join-Path $regBasePath $props.VhdFileName)
+                }
+                break
+            }
+        }
+    }
+
+    if (-not $Quiet) {
+        Write-Log "  Verificación cruzada: 'wsl -l -q' -> $(if ($wslMatch) { "'$wslMatch'" } else { 'NO aparece' })" "INFO"
+        Write-Log "  Verificación cruzada: registro Lxss  -> $(if ($regMatch) { "'$regMatch' (BasePath=$regBasePath, vhdx existe=$regVhdExists)" } else { 'NO hay entrada' })" "INFO"
+        if ($regMatch -and -not $wslMatch) {
+            Write-Log "  DIAGNÓSTICO: hay entrada en el registro pero 'wsl -l' no la reporta -> instalación corrupta o servicio LxssManager con estado inconsistente. Prueba 'wsl --shutdown' y reintenta, o borra la clave y reinstala con -Force." "WARN"
+        }
+        if ($regMatch -and $regBasePath -and -not $regVhdExists) {
+            Write-Log "  DIAGNÓSTICO: el registro apunta a '$regBasePath' pero el .vhdx no existe en disco -> instalación incompleta (falló a medias, o algo borró la carpeta). Antivirus/Defender puede haber puesto en cuarentena el vhdx recién creado." "WARN"
+        }
+        if (-not $regMatch -and -not $wslMatch) {
+            Write-Log "  DIAGNÓSTICO: no hay ni entrada de registro ni reporte de 'wsl -l' -> 'wsl --install --from-file' no llegó a registrar nada. Revisa el bloque anterior de este log (exit code y salida de ese comando) para la causa exacta." "WARN"
+        }
+    }
+    return [pscustomobject]@{ WslName = $wslMatch; RegName = $regMatch; RegBasePath = $regBasePath; VhdExists = $regVhdExists }
+}
+
 function Step-InstallCachyOS {
+    Write-Log "  --- Chequeos previos ---" "INFO"
+    $distroName = Get-CachyDistroName
     $existing = (wsl -l -q 2>$null) | ForEach-Object { $_ -replace "`0","" }
-    if ($existing -contains "cachyos" -and -not $Force) {
-        Write-Log "  Distro 'cachyos' ya existe, se omite instalación (usa -Force para re-hacer)." "INFO"
+    if (($existing | Where-Object { $_ -ieq "cachyos" }) -and -not $Force) {
+        Write-Log "  Distro CachyOS ya existe (nombre registrado: '$distroName'), se omite instalación (usa -Force para re-hacer)." "INFO"
+        Test-CachyOSRegistered | Out-Null
         return
+    }
+
+    # wsl --install --from-file (paquetes .wsl) requiere una versión razonablemente reciente del cliente wsl.
+    $verRaw = (wsl --version 2>&1) -join "`n"
+    Write-Log "  wsl --version actual:`n$verRaw" "INFO"
+    $verLine = $verRaw | Select-String "WSL version" | Select-Object -First 1
+    if ($verLine) {
+        $verStr = ($verLine.ToString() -replace ".*:\s*","").Trim()
+        try {
+            if ([version]$verStr -lt [version]"2.4.4") {
+                Write-Log "  ADVERTENCIA: wsl versión $verStr puede no soportar bien 'wsl --install --from-file' (paquetes .wsl). Corre 'wsl --update' manualmente si esta instalación falla." "WARN"
+            }
+        } catch { }
+    } else {
+        Write-Log "  ADVERTENCIA: no se pudo determinar la versión de wsl.exe desde su salida; puede que WSL no esté correctamente instalado." "WARN"
     }
 
     $downloadDir = Join-Path $env:LOCALAPPDATA "gm-erp2-setup\downloads"
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+    $freeGB = [Math]::Round((Get-PSDrive -Name ($downloadDir.Substring(0,1))).Free / 1GB, 1)
+    Write-Log "  Espacio libre en $($downloadDir.Substring(0,2)): $freeGB GB" "INFO"
+    if ($freeGB -lt 10) {
+        Write-Log "  ADVERTENCIA: menos de 10 GB libres; la instalación de CachyOS (rootfs + crecimiento del vhdx) puede fallar por espacio." "WARN"
+    }
 
+    Write-Log "  Consultando último release de dwalleck/cachyos-wsl..." "INFO"
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/dwalleck/cachyos-wsl/releases/latest"
+    Write-Log "  Release encontrado: $($release.tag_name)" "INFO"
     $asset   = $release.assets | Where-Object { $_.name -eq "cachyos-v3.wsl" }
     $sha256  = $release.assets | Where-Object { $_.name -eq "cachyos-v3.wsl.sha256" }
     if (-not $asset) { throw "No se encontró asset cachyos-v3.wsl en el release $($release.tag_name)" }
+    Write-Log "  Asset: $($asset.name) ($([Math]::Round($asset.size/1MB,1)) MB)" "INFO"
 
     $wslFile = Join-Path $downloadDir "cachyos-v3.wsl"
     $shaFile = Join-Path $downloadDir "cachyos-v3.wsl.sha256"
+    Write-Log "  Descargando $($asset.browser_download_url) -> $wslFile" "INFO"
     Invoke-WebRequest -Uri $asset.browser_download_url  -OutFile $wslFile
+    Write-Log "  Descarga completa ($([Math]::Round((Get-Item $wslFile).Length / 1MB,1)) MB)" "OK"
     Invoke-WebRequest -Uri $sha256.browser_download_url -OutFile $shaFile
 
     $expected = (Get-Content $shaFile).Split(" ")[0].Trim().ToLower()
     $actual   = (Get-FileHash $wslFile -Algorithm SHA256).Hash.ToLower()
-    if ($expected -ne $actual) { throw "Checksum mismatch descargando cachyos-v3.wsl (release $($release.tag_name))" }
+    Write-Log "  Checksum esperado: $expected" "INFO"
+    Write-Log "  Checksum obtenido:  $actual" "INFO"
+    if ($expected -ne $actual) { throw "Checksum mismatch descargando cachyos-v3.wsl (release $($release.tag_name)) -- descarga corrupta o interceptada, no continúo." }
     Write-Log "  Checksum verificado ($($release.tag_name))" "OK"
 
-    if ($existing -contains "cachyos") {
-        wsl --unregister cachyos | Out-Null
+    if ($existing | Where-Object { $_ -ieq "cachyos" }) {
+        Write-Log "  Desregistrando distro CachyOS existente ('$distroName') antes de reinstalar (-Force)..." "WARN"
+        Invoke-LoggedNative -Prefix "wsl --unregister $distroName" -Command { wsl --unregister $distroName } -IgnoreExitCode
     }
-    wsl --install --from-file $wslFile
+
+    Write-Log "  --- Instalación (wsl --install --from-file) ---" "INFO"
+    Invoke-LoggedNative -Prefix "wsl --install --from-file $wslFile" -Command { wsl --install --from-file $wslFile }
     Start-Sleep -Seconds 5
+
+    $check = Test-CachyOSRegistered
+    if (-not $check.WslName) {
+        throw "Tras 'wsl --install --from-file' la distro NO aparece en 'wsl -l -q'. Revisa el DIAGNÓSTICO impreso arriba (registro/vhdx) y la salida del comando de instalación para la causa raíz."
+    }
+    $distroName = $check.WslName
+    Write-Log "  Distro registrada exitosamente como: '$distroName'" "OK"
 
     if (-not $CachyOSPassword) {
         $CachyOSPassword = Read-Host -AsSecureString "Password para el usuario '$CachyOSUsername' en CachyOS"
@@ -224,11 +431,15 @@ EOF
 echo "provision-user: OK"
 '@
 
+    Write-Log "  --- Provisión de usuario dentro de la distro (root) ---" "INFO"
     try {
         $env:CACHYOS_PW = $plainPw
         $env:WSLENV = "CACHYOS_PW"
-        $bashProvision | wsl -d cachyos -u root -- bash -s -- $CachyOSUsername
-        if ($LASTEXITCODE -ne 0) { throw "El script de provisión de usuario terminó con código $LASTEXITCODE" }
+        $provisionOut = $bashProvision | wsl -d $distroName -u root -- bash -s -- $CachyOSUsername 2>&1
+        $code = $LASTEXITCODE
+        $provisionOut | ForEach-Object { Write-Log "    [provision-user] $_" "INFO" }
+        Write-Log "  Script de provisión de usuario -> exit code: $code" "INFO"
+        if ($code -ne 0) { throw "El script de provisión de usuario terminó con código $code" }
     }
     finally {
         Remove-Item Env:\CACHYOS_PW -ErrorAction SilentlyContinue
@@ -236,17 +447,24 @@ echo "provision-user: OK"
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     }
 
-    wsl --shutdown
+    Write-Log "  --- Verificación final ---" "INFO"
+    Invoke-LoggedNative -Prefix "wsl --shutdown" -Command { wsl --shutdown } -IgnoreExitCode
     Start-Sleep -Seconds 3
-    $who = (wsl -d cachyos -- whoami).Trim()
+    $who = (wsl -d $distroName -- whoami 2>&1).Trim()
+    Write-Log "  Usuario default reportado por 'wsl -d $distroName -- whoami': '$who'" "INFO"
     if ($who -ne $CachyOSUsername) { throw "Usuario default esperado '$CachyOSUsername', se obtuvo '$who'" }
-    Write-Log "  Usuario '$CachyOSUsername' verificado como default en cachyos." "OK"
+    Write-Log "  Usuario '$CachyOSUsername' verificado como default en '$distroName'." "OK"
+    Test-CachyOSRegistered | Out-Null
 }
 
 function Step-WriteWslConfig {
     $path = Join-Path $env:UserProfile ".wslconfig"
     if (Test-Path $path) {
-        Copy-Item $path "$path.bak.$([int](Get-Date -UFormat %s))" -Force
+        $bak = "$path.bak.$([int](Get-Date -UFormat %s))"
+        Copy-Item $path $bak -Force
+        Write-Log "  Backup de .wslconfig existente -> $bak" "INFO"
+    } else {
+        Write-Log "  No existía .wslconfig previo en $path" "INFO"
     }
     $content = @"
 [wsl2]
@@ -260,9 +478,10 @@ networkingMode=mirrored
 sparseVhd=true
 autoMemoryReclaim=gradual
 "@
+    Write-Log "  Contenido a escribir:`n$content" "INFO"
     Set-Content -Path $path -Value $content -Encoding ASCII
     Write-Log "  .wslconfig escrito en $path (swap=$WslSwapGB GB a propósito: el swap real va dentro de CachyOS)" "OK"
-    wsl --shutdown
+    Invoke-LoggedNative -Prefix "wsl --shutdown" -Command { wsl --shutdown } -IgnoreExitCode
 }
 
 function Step-InstallAlacritty {
@@ -270,8 +489,11 @@ function Step-InstallAlacritty {
         throw "winget no está disponible en este host; instálalo manualmente (App Installer desde Microsoft Store) y reintenta."
     }
     $installed = winget list --id Alacritty.Alacritty -e 2>$null | Select-String "Alacritty"
+    Write-Log "  Alacritty ya instalado según winget: $([bool]$installed)" "INFO"
     if (-not $installed -or $Force) {
-        winget install --id Alacritty.Alacritty -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        Invoke-LoggedNative -Prefix "winget install Alacritty.Alacritty" -Command {
+            winget install --id Alacritty.Alacritty -e --silent --accept-package-agreements --accept-source-agreements
+        }
     }
 
     # Config real versionada (sazardev/my-alacritty-setup), no una genérica inventada:
@@ -280,6 +502,7 @@ function Step-InstallAlacritty {
     if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
     $zipPath = Join-Path $tmp "repo.zip"
+    Write-Log "  Descargando config de sazardev/my-alacritty-setup..." "INFO"
     Invoke-WebRequest -Uri "https://github.com/sazardev/my-alacritty-setup/archive/refs/heads/main.zip" -OutFile $zipPath
     Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
     $repoDir = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like "my-alacritty-setup-*" } | Select-Object -First 1
@@ -290,16 +513,26 @@ function Step-InstallAlacritty {
     foreach ($f in @("alacritty.toml", "local.toml")) {
         $src = Join-Path $repoDir.FullName $f
         $dst = Join-Path $cfgDir $f
-        if (Test-Path $dst) { Copy-Item $dst "$dst.bak.$([int](Get-Date -UFormat %s))" -Force }
+        if (Test-Path $dst) {
+            $bak = "$dst.bak.$([int](Get-Date -UFormat %s))"
+            Copy-Item $dst $bak -Force
+            Write-Log "  Backup de $f -> $bak" "INFO"
+        }
         Copy-Item $src $dst -Force
+        Write-Log "  Copiado $f -> $dst" "INFO"
     }
     $themesSrc = Join-Path $repoDir.FullName "themes"
     if (Test-Path $themesSrc) { Copy-Item $themesSrc $cfgDir -Recurse -Force }
 
-    # el repo asume el nombre de distro "CachyOS"; nuestra instalación la registró en minúsculas ("cachyos")
+    # el repo asume el nombre de distro "CachyOS"; usamos el nombre REAL con el que quedó
+    # registrada (puede no ser exactamente "CachyOS" según el .wsl instalado)
+    $distroName = Get-CachyDistroName
     $localTomlPath = Join-Path $cfgDir "local.toml"
     if (Test-Path $localTomlPath) {
-        (Get-Content $localTomlPath -Raw) -replace '"CachyOS"', '"cachyos"' | Set-Content $localTomlPath -Encoding UTF8
+        (Get-Content $localTomlPath -Raw) -replace '"CachyOS"', "`"$distroName`"" | Set-Content $localTomlPath -Encoding UTF8
+        Write-Log "  local.toml ajustado para usar la distro '$distroName' (detectada en 'wsl -l -q')" "OK"
+    } else {
+        Write-Log "  ADVERTENCIA: no se encontró local.toml en $cfgDir tras copiar el repo; Alacritty no tendrá shell configurado." "WARN"
     }
 
     $ver = & alacritty --version 2>$null
@@ -308,32 +541,60 @@ function Step-InstallAlacritty {
 }
 
 function Step-InstallClaudeWindows {
-    if (-not $InstallClaudeOnWindows) { return }
+    if (-not $InstallClaudeOnWindows) {
+        Write-Log "  InstallClaudeOnWindows=false, se omite este paso." "INFO"
+        return
+    }
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-        winget install --id OpenJS.NodeJS.LTS -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        Write-Log "  Node.js no encontrado, instalando OpenJS.NodeJS.LTS via winget..." "INFO"
+        Invoke-LoggedNative -Prefix "winget install OpenJS.NodeJS.LTS" -Command {
+            winget install --id OpenJS.NodeJS.LTS -e --silent --accept-package-agreements --accept-source-agreements
+        }
         # refresca PATH de la sesión actual sin reabrir la terminal
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+        Write-Log "  PATH refrescado tras instalar Node.js" "INFO"
+    } else {
+        Write-Log "  Node.js ya presente: $(node --version 2>$null)" "INFO"
     }
-    npm install -g @anthropic-ai/claude-code 2>&1 | Out-Null
+    Invoke-LoggedNative -Prefix "npm install -g @anthropic-ai/claude-code" -Command {
+        npm install -g @anthropic-ai/claude-code
+    }
     $ver = & claude --version 2>$null
     Write-Log "  Claude Code (Windows nativo): $ver" "OK"
 }
 
 function Step-ValidateAll {
+    $check = Test-CachyOSRegistered
     $report = [ordered]@{
-        "wsl --version"        = (wsl --version 2>&1 | Select-Object -First 1)
-        "distro cachyos"       = ((wsl -l -v 2>&1) -join " | ")
-        "alacritty --version"  = (& alacritty --version 2>$null)
+        "wsl --version"          = (wsl --version 2>&1 | Select-Object -First 1)
+        "distro (wsl -l -v)"     = ((wsl -l -v 2>&1) -join " | ")
+        "distro nombre detectado"= (if ($check.WslName) { $check.WslName } else { "NO REGISTRADA" })
+        "distro vhdx en disco"   = $check.VhdExists
+        "alacritty --version"    = (& alacritty --version 2>$null)
         "claude --version (win)" = (& claude --version 2>$null)
-        ".wslconfig existe"    = (Test-Path (Join-Path $env:UserProfile ".wslconfig"))
+        ".wslconfig existe"      = (Test-Path (Join-Path $env:UserProfile ".wslconfig"))
     }
     foreach ($k in $report.Keys) { Write-Log ("  {0,-28}: {1}" -f $k, $report[$k]) "INFO" }
+    if (-not $check.WslName) {
+        Write-Log "  RESULTADO: CachyOS NO está registrada en este momento. Revisa los bloques 'DIAGNÓSTICO' y '[wsl --install]' más arriba en este mismo log para la causa." "ERROR"
+    }
 }
 
 # ---------- main ----------
 Assert-Admin
 New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null
 Write-Log "=== windows-host-setup.ps1 v$Script:Version ===" "INFO"
+Write-Log "Log file: $Script:LogFile" "INFO"
+$idCheck = [Security.Principal.WindowsIdentity]::GetCurrent()
+Write-Log "Identidad del proceso: $($idCheck.Name) (elevado)" "INFO"
+Write-Log "Usuario interactivo esperado: $($env:USERDOMAIN)\$($env:USERNAME) | UserProfile: $env:UserProfile" "INFO"
+Write-Log "Host: $($env:COMPUTERNAME) | PS: $($PSVersionTable.PSVersion) | OS: $([System.Environment]::OSVersion.VersionString)" "INFO"
+if ($idCheck.Name -notlike "*\$($env:USERNAME)") {
+    Write-Log "ADVERTENCIA: la identidad elevada ('$($idCheck.Name)') no coincide con el usuario interactivo ('$($env:USERNAME)'). Si tu Windows pide credenciales de OTRA cuenta admin al elevar, WSL/CachyOS quedará registrado bajo el perfil de esa cuenta y no aparecerá para tu usuario normal." "WARN"
+}
+
+# Preflight siempre corre (aunque se use -Only), es puro diagnóstico y no tiene estado idempotente.
+Step-Preflight
 
 Invoke-Step -Name "EnableWslFeatures" -Action { Step-EnableWslFeatures }
 Invoke-Step -Name "UpdateWsl"         -Action { Step-UpdateWsl }

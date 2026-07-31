@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
   windows-host-setup.ps1
   Provisioning idempotente del host Windows para gm-erp2:

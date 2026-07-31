@@ -271,7 +271,8 @@ function Step-InstallNerdFonts {
         $zipPath = Join-Path $tmp "$fontName.zip"
         Write-Log "  Descargando $($asset.browser_download_url) -> $zipPath" "INFO"
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
-        Write-Log "  Descarga completa ($([Math]::Round((Get-Item $zipPath).Length / 1MB, 1)) MB), extrayendo..." "INFO"
+        $sizeMB = [Math]::Round((Get-Item $zipPath).Length / 1048576, 1)
+        Write-Log "  Descarga completa ($sizeMB MB), extrayendo..." "INFO"
         $extractDir = Join-Path $tmp $fontName
         Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
         $ttfs = Get-ChildItem $extractDir -Include *.ttf, *.otf -Recurse
@@ -350,7 +351,7 @@ function Step-InstallCachyOS {
 
     $downloadDir = Join-Path $env:LOCALAPPDATA "gm-erp2-setup\downloads"
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-    $freeGB = [Math]::Round((Get-PSDrive -Name ($downloadDir.Substring(0,1))).Free / 1GB, 1)
+    $freeGB = [Math]::Round((Get-PSDrive -Name ($downloadDir.Substring(0,1))).Free / 1073741824, 1)
     Write-Log "  Espacio libre en $($downloadDir.Substring(0,2)): $freeGB GB" "INFO"
     if ($freeGB -lt 10) {
         Write-Log "  ADVERTENCIA: menos de 10 GB libres; la instalación de CachyOS (rootfs + crecimiento del vhdx) puede fallar por espacio." "WARN"
@@ -362,13 +363,15 @@ function Step-InstallCachyOS {
     $asset   = $release.assets | Where-Object { $_.name -eq "cachyos-v3.wsl" }
     $sha256  = $release.assets | Where-Object { $_.name -eq "cachyos-v3.wsl.sha256" }
     if (-not $asset) { throw "No se encontró asset cachyos-v3.wsl en el release $($release.tag_name)" }
-    Write-Log "  Asset: $($asset.name) ($([Math]::Round($asset.size/1MB,1)) MB)" "INFO"
+    $assetSizeMB = [Math]::Round($asset.size / 1048576, 1)
+    Write-Log "  Asset: $($asset.name) ($assetSizeMB MB)" "INFO"
 
     $wslFile = Join-Path $downloadDir "cachyos-v3.wsl"
     $shaFile = Join-Path $downloadDir "cachyos-v3.wsl.sha256"
     Write-Log "  Descargando $($asset.browser_download_url) -> $wslFile" "INFO"
     Invoke-WebRequest -Uri $asset.browser_download_url  -OutFile $wslFile
-    Write-Log "  Descarga completa ($([Math]::Round((Get-Item $wslFile).Length / 1MB,1)) MB)" "OK"
+    $downloadedSizeMB = [Math]::Round((Get-Item $wslFile).Length / 1048576, 1)
+    Write-Log "  Descarga completa ($downloadedSizeMB MB)" "OK"
     Invoke-WebRequest -Uri $sha256.browser_download_url -OutFile $shaFile
 
     $expected = (Get-Content $shaFile).Split(" ")[0].Trim().ToLower()
@@ -460,7 +463,8 @@ echo "provision-user: OK"
 function Step-WriteWslConfig {
     $path = Join-Path $env:UserProfile ".wslconfig"
     if (Test-Path $path) {
-        $bak = "$path.bak.$([int](Get-Date -UFormat %s))"
+        $ts = [int](Get-Date -UFormat %s)
+        $bak = "$path.bak.$ts"
         Copy-Item $path $bak -Force
         Write-Log "  Backup de .wslconfig existente -> $bak" "INFO"
     } else {
@@ -489,7 +493,8 @@ function Step-InstallAlacritty {
         throw "winget no está disponible en este host; instálalo manualmente (App Installer desde Microsoft Store) y reintenta."
     }
     $installed = winget list --id Alacritty.Alacritty -e 2>$null | Select-String "Alacritty"
-    Write-Log "  Alacritty ya instalado según winget: $([bool]$installed)" "INFO"
+    $installedBool = [bool]$installed
+    Write-Log "  Alacritty ya instalado según winget: $installedBool" "INFO"
     if (-not $installed -or $Force) {
         Invoke-LoggedNative -Prefix "winget install Alacritty.Alacritty" -Command {
             winget install --id Alacritty.Alacritty -e --silent --accept-package-agreements --accept-source-agreements
@@ -514,7 +519,8 @@ function Step-InstallAlacritty {
         $src = Join-Path $repoDir.FullName $f
         $dst = Join-Path $cfgDir $f
         if (Test-Path $dst) {
-            $bak = "$dst.bak.$([int](Get-Date -UFormat %s))"
+            $ts = [int](Get-Date -UFormat %s)
+            $bak = "$dst.bak.$ts"
             Copy-Item $dst $bak -Force
             Write-Log "  Backup de $f -> $bak" "INFO"
         }
@@ -588,7 +594,8 @@ Write-Log "Log file: $Script:LogFile" "INFO"
 $idCheck = [Security.Principal.WindowsIdentity]::GetCurrent()
 Write-Log "Identidad del proceso: $($idCheck.Name) (elevado)" "INFO"
 Write-Log "Usuario interactivo esperado: $($env:USERDOMAIN)\$($env:USERNAME) | UserProfile: $env:UserProfile" "INFO"
-Write-Log "Host: $($env:COMPUTERNAME) | PS: $($PSVersionTable.PSVersion) | OS: $([System.Environment]::OSVersion.VersionString)" "INFO"
+$osVersionString = [System.Environment]::OSVersion.VersionString
+Write-Log "Host: $env:COMPUTERNAME | PS: $($PSVersionTable.PSVersion) | OS: $osVersionString" "INFO"
 if ($idCheck.Name -notlike "*\$($env:USERNAME)") {
     Write-Log "ADVERTENCIA: la identidad elevada ('$($idCheck.Name)') no coincide con el usuario interactivo ('$($env:USERNAME)'). Si tu Windows pide credenciales de OTRA cuenta admin al elevar, WSL/CachyOS quedará registrado bajo el perfil de esa cuenta y no aparecerá para tu usuario normal." "WARN"
 }

@@ -21,17 +21,19 @@ GitHub (más detalle en [Provisioning](#provisioning-de-máquina-nueva-windows-h
 iwr -useb "https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/windows-host-setup.ps1" -OutFile "$env:TEMP\windows-host-setup.ps1"; & "$env:TEMP\windows-host-setup.ps1"
 ```
 
-**2) Ya dentro de CachyOS-WSL (bash, usuario normal, no root):**
+**2) Ya dentro de CachyOS-WSL (usuario normal, no root — funciona en bash,
+zsh y fish, no uses `bash <(curl ...)` porque esa sustitución de procesos
+no existe en fish):**
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/cachyos-provision.sh)
+curl -fsSL https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/cachyos-provision.sh | bash
 ```
 
 Con parámetros (token de GitHub, dotfiles, binario de herdr, rama de
 gm-erp2 — todos opcionales):
 
 ```bash
-GH_TOKEN=ghp_xxx bash <(curl -fsSL https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/cachyos-provision.sh) \
+curl -fsSL https://raw.githubusercontent.com/sazardev/my-herdr-setup/main/provisioning/cachyos-provision.sh | GH_TOKEN=ghp_xxx bash -s -- \
   --dotfiles-repo <url-tus-dotfiles> \
   --herdr-binary <ruta-al-binario-si-lo-tienes> \
   --gm-erp2-branch dev

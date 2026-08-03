@@ -391,7 +391,19 @@ step_gm_erp2_hooks() {
 
 step_gm_erp2_playwright() {
   [[ -d "$GM_ERP2_DIR/.git" ]] || return 1
-  (cd "$GM_ERP2_DIR" && pnpm exec playwright install --with-deps)
+  # Playwright solo sabe auto-instalar deps de sistema (--with-deps) en distros basados
+  # en apt/dnf; en Arch/CachyOS no existe ese soporte y truena buscando apt-get. Instalamos
+  # a mano el equivalente en pacman de las libs que Chromium/Firefox/WebKit piden en
+  # runtime, y luego solo bajamos los binarios de los navegadores (sin --with-deps).
+  sudo pacman -S --needed --noconfirm \
+    nss nspr atk at-spi2-atk at-spi2-core cups libdrm mesa \
+    libxcomposite libxdamage libxfixes libxrandr libxkbcommon \
+    pango cairo gtk3 gdk-pixbuf2 alsa-lib dbus \
+    libxshmfence libxi libxtst libxext libx11 libxcb expat glib2
+  if ! (cd "$GM_ERP2_DIR" && pnpm exec playwright install); then
+    log_warn "  playwright install falló incluso con las libs de pacman -- corre 'pnpm exec playwright install-deps' manualmente en $GM_ERP2_DIR para ver qué falta exactamente"
+    return 1
+  fi
 }
 
 step_dotfiles() {

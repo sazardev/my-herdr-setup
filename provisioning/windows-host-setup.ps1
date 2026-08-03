@@ -74,26 +74,63 @@ $Script:State = Get-State
 
 # ---------- helpers de ejecución/diagnóstico ----------
 function Invoke-LoggedNative {
-    # Corre un comando nativo, loguea cada línea de su salida (stdout+stderr) con un prefijo
-    # y lanza si el exit code no es 0. Evita los "| Out-Null" que ocultan fallas silenciosas.
+    # Corre un comando nativo, loguea cada línea de su salida (stdout+stderr) EN VIVO (streaming,
+    # no bufereada) con un prefijo, y lanza si el exit code no es 0. Evita los "| Out-Null" que
+    # ocultan fallas silenciosas.
+    #
+    # Además corre un heartbeat en un runspace separado (mismo proceso, por eso sí se ve en la
+    # consola real) que imprime "sigue en ejecución" cada $HeartbeatSeconds si el comando no ha
+    # producido salida nueva. Comandos como 'wsl --install --from-file' o 'winget install' pueden
+    # quedarse varios minutos sin imprimir nada mientras extraen/descargan -- sin esto parece que
+    # el script se congeló y el usuario cancela con Ctrl+C justo antes de que termine.
     param(
         [Parameter(Mandatory)][string]$Prefix,
         [Parameter(Mandatory)][scriptblock]$Command,
-        [switch]$IgnoreExitCode
+        [switch]$IgnoreExitCode,
+        [int]$HeartbeatSeconds = 15
     )
     Write-Log "  >> $Prefix" "INFO"
-    $output = & $Command 2>&1
-    $code = $LASTEXITCODE
-    if ($null -eq $output -or $output.Count -eq 0) {
+
+    $hbRunspace = [runspacefactory]::CreateRunspace()
+    $hbRunspace.Open()
+    $hbPs = [powershell]::Create()
+    $hbPs.Runspace = $hbRunspace
+    [void]$hbPs.AddScript({
+        param($Prefix, $HeartbeatSeconds, $LogFile)
+        $elapsed = 0
+        while ($true) {
+            Start-Sleep -Seconds $HeartbeatSeconds
+            $elapsed += $HeartbeatSeconds
+            $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            $line = "[$ts] [INFO]     ... $Prefix sigue en ejecución (${elapsed}s sin salida nueva; normal en descargas/instalaciones grandes, no canceles)"
+            Write-Host $line -ForegroundColor DarkGray
+            Add-Content -Path $LogFile -Value $line -Encoding UTF8
+        }
+    }).AddArgument($Prefix).AddArgument($HeartbeatSeconds).AddArgument($Script:LogFile)
+    [void]$hbPs.BeginInvoke()
+
+    $lineCount = 0
+    try {
+        & $Command 2>&1 | ForEach-Object {
+            $lineCount++
+            Write-Log "    [$Prefix] $_" "INFO"
+        }
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $hbPs.Stop()
+        $hbPs.Dispose()
+        $hbRunspace.Close()
+        $hbRunspace.Dispose()
+    }
+
+    if ($lineCount -eq 0) {
         Write-Log "    [$Prefix] (sin salida)" "INFO"
-    } else {
-        $output | ForEach-Object { Write-Log "    [$Prefix] $_" "INFO" }
     }
     Write-Log "  << $Prefix (exit code: $code)" "INFO"
     if (-not $IgnoreExitCode -and $code -ne 0) {
         throw "$Prefix terminó con exit code $code"
     }
-    return $output
 }
 
 function Get-CachyDistroName {

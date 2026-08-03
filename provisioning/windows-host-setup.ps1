@@ -399,6 +399,48 @@ function ConvertTo-NativeLastLine {
     }
 }
 
+function Repair-CachyOSDefaultUser {
+    # Falla conocida de las imágenes .wsl empaquetadas: el DefaultUid que queda en el registro
+    # de Windows (Lxss) a veces gana sobre el '[user] default' de /etc/wsl.conf tras reinicios o
+    # reintentos de instalación, y 'wsl -d Distro' termina abriendo como root en vez del usuario
+    # provisionado. Se repara reescribiendo wsl.conf y, si el cliente wsl lo soporta, forzando el
+    # default vía 'wsl --manage --set-default-user'.
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$Username
+    )
+    Write-Log "  Usuario default incorrecto; se reescribe /etc/wsl.conf y se reintenta..." "WARN"
+
+    $fixConf = @'
+set -euo pipefail
+cat > /etc/wsl.conf <<EOF
+[boot]
+systemd = true
+
+[network]
+generateHosts = true
+generateResolvConf = true
+
+[interop]
+enabled = true
+appendWindowsPath = false
+
+[user]
+default = $1
+EOF
+echo "wsl.conf reescrito con [user] default = $1"
+'@
+    $out = $fixConf | wsl -d $DistroName -u root -- bash -s -- $Username 2>&1
+    $out | ForEach-Object { Write-Log "    [repair-wsl.conf] $($_.ToString())" "INFO" }
+
+    Invoke-LoggedNative -Prefix "wsl --manage $DistroName --set-default-user $Username (best-effort, puede no existir en este cliente wsl)" -Command {
+        wsl --manage $DistroName --set-default-user $Username
+    } -IgnoreExitCode
+
+    Invoke-LoggedNative -Prefix "wsl --shutdown" -Command { wsl --shutdown } -IgnoreExitCode
+    Start-Sleep -Seconds 5
+}
+
 function Test-CachyOSHealthy {
     # Verificación de campo de que CachyOS no solo "está registrada" sino que funciona:
     # arranca, systemd corre, y el usuario quedó con el grupo/shell que el provisioning debía darle.
@@ -415,7 +457,14 @@ function Test-CachyOSHealthy {
 
     $who = wsl -d $DistroName -- whoami 2>&1 | ConvertTo-NativeLastLine
     Write-Log "  Usuario default reportado por 'wsl -d $DistroName -- whoami': '$who'" "INFO"
-    if ($who -ne $Username) { throw "Usuario default esperado '$Username' en '$DistroName', se obtuvo '$who'" }
+    if ($who -ne $Username) {
+        Repair-CachyOSDefaultUser -DistroName $DistroName -Username $Username
+        $who = wsl -d $DistroName -- whoami 2>&1 | ConvertTo-NativeLastLine
+        Write-Log "  Usuario default reportado tras reparación: '$who'" "INFO"
+        if ($who -ne $Username) {
+            throw "Usuario default esperado '$Username' en '$DistroName', se obtuvo '$who' (incluso tras reescribir wsl.conf y reintentar)."
+        }
+    }
     Write-Log "  Usuario '$Username' verificado como default en '$DistroName'." "OK"
 
     $sysState = wsl -d $DistroName -u root -- systemctl is-system-running 2>&1 | ConvertTo-NativeLastLine

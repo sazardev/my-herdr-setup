@@ -10,11 +10,16 @@
     .\windows-host-setup.ps1 -Force                  # re-ejecuta todos los pasos aunque ya estén hechos
     .\windows-host-setup.ps1 -Only InstallCachyOS     # corre solo un paso
     .\windows-host-setup.ps1 -WslMemoryGB 20 -WslProcessors 18 -WslSwapGB 0
+    .\windows-host-setup.ps1 -CachyOSUsername jdoe    # fuerza un usuario Linux distinto al detectado
+
+  Script genérico para cualquier dev: por defecto, $CachyOSUsername NO está fijo a una persona --
+  se deriva del usuario de Windows que corre el script ($env:USERNAME), saneado a un username
+  Linux válido. Cada quien obtiene su propio usuario dentro de CachyOS con su propio nombre.
 #>
 
 [CmdletBinding()]
 param(
-    [string]   $CachyOSUsername   = "omar",
+    [string]   $CachyOSUsername   = (($env:USERNAME) -replace '[^a-zA-Z0-9]', '').ToLower(),
     [SecureString] $CachyOSPassword,
     [string[]] $NerdFonts         = @("JetBrainsMono"),
     [int]      $WslMemoryGB       = 20,

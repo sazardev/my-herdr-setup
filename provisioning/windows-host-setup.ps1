@@ -385,6 +385,20 @@ function Test-CachyOSRegistered {
     return [pscustomobject]@{ WslName = $wslMatch; RegName = $regMatch; RegBasePath = $regBasePath; VhdExists = $regVhdExists }
 }
 
+function ConvertTo-NativeLastLine {
+    # 'comando_nativo 2>&1' devuelve una MEZCLA de [string] (stdout) y [ErrorRecord] (stderr);
+    # ErrorRecord no tiene .Trim(), así que sin esto cualquier warning benigno en stderr durante
+    # un arranque en frío de WSL rompe el script con "does not contain a method named 'Trim'".
+    param([Parameter(ValueFromPipeline)]$InputObject)
+    begin { $lines = [System.Collections.Generic.List[string]]::new() }
+    process { if ($null -ne $InputObject) { $lines.Add($InputObject.ToString()) } }
+    end {
+        $nonEmpty = $lines | Where-Object { $_.Trim() -ne "" }
+        if ($nonEmpty.Count -eq 0) { return "" }
+        return ($nonEmpty | Select-Object -Last 1).Trim()
+    }
+}
+
 function Test-CachyOSHealthy {
     # Verificación de campo de que CachyOS no solo "está registrada" sino que funciona:
     # arranca, systemd corre, y el usuario quedó con el grupo/shell que el provisioning debía darle.
@@ -399,12 +413,12 @@ function Test-CachyOSHealthy {
         throw "CachyOS no aparece registrada en 'wsl -l -q' -- revisa el DIAGNÓSTICO impreso arriba."
     }
 
-    $who = (wsl -d $DistroName -- whoami 2>&1).Trim()
+    $who = wsl -d $DistroName -- whoami 2>&1 | ConvertTo-NativeLastLine
     Write-Log "  Usuario default reportado por 'wsl -d $DistroName -- whoami': '$who'" "INFO"
     if ($who -ne $Username) { throw "Usuario default esperado '$Username' en '$DistroName', se obtuvo '$who'" }
     Write-Log "  Usuario '$Username' verificado como default en '$DistroName'." "OK"
 
-    $sysState = ((wsl -d $DistroName -u root -- systemctl is-system-running 2>&1) | Select-Object -Last 1).Trim()
+    $sysState = wsl -d $DistroName -u root -- systemctl is-system-running 2>&1 | ConvertTo-NativeLastLine
     Write-Log "  Estado de systemd ('systemctl is-system-running'): '$sysState'" "INFO"
     if ($sysState -in @("running", "degraded")) {
         Write-Log "  systemd operativo dentro de '$DistroName' (estado: $sysState; 'degraded' es normal y no bloquea nada)." "OK"
@@ -412,13 +426,13 @@ function Test-CachyOSHealthy {
         Write-Log "  ADVERTENCIA: systemd no reporta 'running'/'degraded' sino '$sysState' -- '[boot] systemd=true' puede no haber tomado efecto. Prueba 'wsl --shutdown' y vuelve a abrir la distro; si persiste, revisa 'wsl -d $DistroName -u root -- systemctl --failed'." "WARN"
     }
 
-    $idOut = (wsl -d $DistroName -- id $Username 2>&1).Trim()
+    $idOut = wsl -d $DistroName -- id $Username 2>&1 | ConvertTo-NativeLastLine
     Write-Log "  'id $Username' -> $idOut" "INFO"
     if ($idOut -notmatch "\bwheel\b") {
         throw "El usuario '$Username' no quedó en el grupo 'wheel' dentro de '$DistroName' (sudo no va a funcionar): $idOut"
     }
 
-    $shellOut = (wsl -d $DistroName -- getent passwd $Username 2>&1).Trim()
+    $shellOut = wsl -d $DistroName -- getent passwd $Username 2>&1 | ConvertTo-NativeLastLine
     Write-Log "  'getent passwd $Username' -> $shellOut" "INFO"
     if ($shellOut -notmatch "/usr/bin/zsh$") {
         throw "El shell default de '$Username' en '$DistroName' no quedó en /usr/bin/zsh: $shellOut"
@@ -698,7 +712,7 @@ function Step-ValidateAll {
     $sysState = "N/D (distro no registrada)"
     if ($check.WslName) {
         try {
-            $sysState = ((wsl -d $check.WslName -u root -- systemctl is-system-running 2>&1) | Select-Object -Last 1).Trim()
+            $sysState = wsl -d $check.WslName -u root -- systemctl is-system-running 2>&1 | ConvertTo-NativeLastLine
         } catch { $sysState = "error consultando: $($_.Exception.Message)" }
     }
     $report = [ordered]@{

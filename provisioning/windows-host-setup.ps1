@@ -133,6 +133,30 @@ function Invoke-LoggedNative {
     }
 }
 
+function Invoke-WithRetry {
+    # Reintenta $Action hasta $MaxAttempts veces con espera $DelaySeconds entre intentos.
+    # Pensado para llamadas de red (GitHub API / descargas) que pueden fallar de forma transitoria
+    # en un AVD (throttling, DNS, hipo de red) -- sin esto, un solo hipo tira todo el paso a la basura.
+    param(
+        [Parameter(Mandatory)][string]$Prefix,
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [int]$MaxAttempts = 3,
+        [int]$DelaySeconds = 10
+    )
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            return & $Action
+        } catch {
+            if ($attempt -ge $MaxAttempts) {
+                Write-Log "  $Prefix : falló tras $attempt intento(s), no quedan reintentos -- $($_.Exception.Message)" "ERROR"
+                throw
+            }
+            Write-Log "  $Prefix : falló (intento $attempt/$MaxAttempts) -- $($_.Exception.Message). Reintentando en ${DelaySeconds}s..." "WARN"
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+}
+
 function Get-CachyDistroName {
     # WSL registra el nombre tal cual viene del paquete .wsl (p.ej. "CachyOS"), no necesariamente
     # en minúsculas. Buscamos el nombre real registrado en vez de asumir "cachyos" a pelo.
@@ -361,13 +385,54 @@ function Test-CachyOSRegistered {
     return [pscustomobject]@{ WslName = $wslMatch; RegName = $regMatch; RegBasePath = $regBasePath; VhdExists = $regVhdExists }
 }
 
+function Test-CachyOSHealthy {
+    # Verificación de campo de que CachyOS no solo "está registrada" sino que funciona:
+    # arranca, systemd corre, y el usuario quedó con el grupo/shell que el provisioning debía darle.
+    # Se usa tanto después de una instalación nueva como al detectar que ya existía (idempotencia real,
+    # no solo "wsl -l la reporta").
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$Username
+    )
+    $reg = Test-CachyOSRegistered
+    if (-not $reg.WslName) {
+        throw "CachyOS no aparece registrada en 'wsl -l -q' -- revisa el DIAGNÓSTICO impreso arriba."
+    }
+
+    $who = (wsl -d $DistroName -- whoami 2>&1).Trim()
+    Write-Log "  Usuario default reportado por 'wsl -d $DistroName -- whoami': '$who'" "INFO"
+    if ($who -ne $Username) { throw "Usuario default esperado '$Username' en '$DistroName', se obtuvo '$who'" }
+    Write-Log "  Usuario '$Username' verificado como default en '$DistroName'." "OK"
+
+    $sysState = ((wsl -d $DistroName -u root -- systemctl is-system-running 2>&1) | Select-Object -Last 1).Trim()
+    Write-Log "  Estado de systemd ('systemctl is-system-running'): '$sysState'" "INFO"
+    if ($sysState -in @("running", "degraded")) {
+        Write-Log "  systemd operativo dentro de '$DistroName' (estado: $sysState; 'degraded' es normal y no bloquea nada)." "OK"
+    } else {
+        Write-Log "  ADVERTENCIA: systemd no reporta 'running'/'degraded' sino '$sysState' -- '[boot] systemd=true' puede no haber tomado efecto. Prueba 'wsl --shutdown' y vuelve a abrir la distro; si persiste, revisa 'wsl -d $DistroName -u root -- systemctl --failed'." "WARN"
+    }
+
+    $idOut = (wsl -d $DistroName -- id $Username 2>&1).Trim()
+    Write-Log "  'id $Username' -> $idOut" "INFO"
+    if ($idOut -notmatch "\bwheel\b") {
+        throw "El usuario '$Username' no quedó en el grupo 'wheel' dentro de '$DistroName' (sudo no va a funcionar): $idOut"
+    }
+
+    $shellOut = (wsl -d $DistroName -- getent passwd $Username 2>&1).Trim()
+    Write-Log "  'getent passwd $Username' -> $shellOut" "INFO"
+    if ($shellOut -notmatch "/usr/bin/zsh$") {
+        throw "El shell default de '$Username' en '$DistroName' no quedó en /usr/bin/zsh: $shellOut"
+    }
+    Write-Log "  Grupo 'wheel' y shell 'zsh' verificados para '$Username' en '$DistroName'." "OK"
+}
+
 function Step-InstallCachyOS {
-    Write-Log "  --- Chequeos previos ---" "INFO"
+    Write-Log "  [1/5] Chequeos previos" "INFO"
     $distroName = Get-CachyDistroName
     $existing = (wsl -l -q 2>$null) | ForEach-Object { $_ -replace "`0","" }
     if (($existing | Where-Object { $_ -ieq "cachyos" }) -and -not $Force) {
         Write-Log "  Distro CachyOS ya existe (nombre registrado: '$distroName'), se omite instalación (usa -Force para re-hacer)." "INFO"
-        Test-CachyOSRegistered | Out-Null
+        Test-CachyOSHealthy -DistroName $distroName -Username $CachyOSUsername
         return
     }
 
@@ -394,42 +459,68 @@ function Step-InstallCachyOS {
         Write-Log "  ADVERTENCIA: menos de 10 GB libres; la instalación de CachyOS (rootfs + crecimiento del vhdx) puede fallar por espacio." "WARN"
     }
 
-    Write-Log "  Consultando último release de dwalleck/cachyos-wsl..." "INFO"
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/dwalleck/cachyos-wsl/releases/latest"
+    Write-Log "  [2/5] Descarga y verificación del paquete .wsl" "INFO"
+    $release = Invoke-WithRetry -Prefix "GET release dwalleck/cachyos-wsl" -Action {
+        Invoke-RestMethod -Uri "https://api.github.com/repos/dwalleck/cachyos-wsl/releases/latest"
+    }
     Write-Log "  Release encontrado: $($release.tag_name)" "INFO"
     $asset   = $release.assets | Where-Object { $_.name -eq "cachyos-v3.wsl" }
     $sha256  = $release.assets | Where-Object { $_.name -eq "cachyos-v3.wsl.sha256" }
-    if (-not $asset) { throw "No se encontró asset cachyos-v3.wsl en el release $($release.tag_name)" }
+    if (-not $asset)  { throw "No se encontró asset cachyos-v3.wsl en el release $($release.tag_name)" }
+    if (-not $sha256) { throw "No se encontró asset cachyos-v3.wsl.sha256 en el release $($release.tag_name)" }
     $assetSizeMB = [Math]::Round($asset.size / 1048576, 1)
     Write-Log "  Asset: $($asset.name) ($assetSizeMB MB)" "INFO"
 
     $wslFile = Join-Path $downloadDir "cachyos-v3.wsl"
     $shaFile = Join-Path $downloadDir "cachyos-v3.wsl.sha256"
-    Write-Log "  Descargando $($asset.browser_download_url) -> $wslFile" "INFO"
-    Invoke-WebRequest -Uri $asset.browser_download_url  -OutFile $wslFile
-    $downloadedSizeMB = [Math]::Round((Get-Item $wslFile).Length / 1048576, 1)
-    Write-Log "  Descarga completa ($downloadedSizeMB MB)" "OK"
-    Invoke-WebRequest -Uri $sha256.browser_download_url -OutFile $shaFile
-
+    Invoke-WithRetry -Prefix "descarga de $($sha256.name)" -Action {
+        Invoke-WebRequest -Uri $sha256.browser_download_url -OutFile $shaFile
+    } | Out-Null
     $expected = (Get-Content $shaFile).Split(" ")[0].Trim().ToLower()
-    $actual   = (Get-FileHash $wslFile -Algorithm SHA256).Hash.ToLower()
     Write-Log "  Checksum esperado: $expected" "INFO"
-    Write-Log "  Checksum obtenido:  $actual" "INFO"
-    if ($expected -ne $actual) { throw "Checksum mismatch descargando cachyos-v3.wsl (release $($release.tag_name)) -- descarga corrupta o interceptada, no continúo." }
-    Write-Log "  Checksum verificado ($($release.tag_name))" "OK"
+
+    if ((Test-Path $wslFile) -and ((Get-FileHash $wslFile -Algorithm SHA256).Hash.ToLower() -eq $expected)) {
+        Write-Log "  '$($asset.name)' ya está en caché en $wslFile y su checksum coincide; se omite la descarga de $assetSizeMB MB." "OK"
+    } else {
+        Invoke-WithRetry -Prefix "descarga de $($asset.name)" -MaxAttempts 3 -DelaySeconds 15 -Action {
+            Write-Log "  Descargando $($asset.browser_download_url) -> $wslFile" "INFO"
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $wslFile
+            $downloadedSizeMB = [Math]::Round((Get-Item $wslFile).Length / 1048576, 1)
+            Write-Log "  Descarga completa ($downloadedSizeMB MB), verificando checksum..." "INFO"
+            $actual = (Get-FileHash $wslFile -Algorithm SHA256).Hash.ToLower()
+            Write-Log "  Checksum obtenido:  $actual" "INFO"
+            if ($expected -ne $actual) {
+                Remove-Item $wslFile -Force -ErrorAction SilentlyContinue
+                throw "Checksum mismatch descargando $($asset.name) (release $($release.tag_name)) -- descarga corrupta o interceptada."
+            }
+        } | Out-Null
+        Write-Log "  Checksum verificado ($($release.tag_name))" "OK"
+    }
 
     if ($existing | Where-Object { $_ -ieq "cachyos" }) {
         Write-Log "  Desregistrando distro CachyOS existente ('$distroName') antes de reinstalar (-Force)..." "WARN"
         Invoke-LoggedNative -Prefix "wsl --unregister $distroName" -Command { wsl --unregister $distroName } -IgnoreExitCode
     }
 
-    Write-Log "  --- Instalación (wsl --install --from-file) ---" "INFO"
-    Invoke-LoggedNative -Prefix "wsl --install --from-file $wslFile" -Command { wsl --install --from-file $wslFile }
-    Start-Sleep -Seconds 5
-
-    $check = Test-CachyOSRegistered
+    Write-Log "  [3/5] Instalación (wsl --install --from-file)" "INFO"
+    $maxInstallAttempts = 2
+    $check = $null
+    for ($attempt = 1; $attempt -le $maxInstallAttempts; $attempt++) {
+        Invoke-LoggedNative -Prefix "wsl --install --from-file $wslFile (intento $attempt/$maxInstallAttempts)" -Command { wsl --install --from-file $wslFile } -IgnoreExitCode
+        Start-Sleep -Seconds 5
+        $check = Test-CachyOSRegistered
+        if ($check.WslName) { break }
+        if ($attempt -lt $maxInstallAttempts) {
+            Write-Log "  La distro no quedó registrada en el intento $attempt; se limpia el estado parcial y se reintenta..." "WARN"
+            Invoke-LoggedNative -Prefix "wsl --shutdown" -Command { wsl --shutdown } -IgnoreExitCode
+            if ($check.RegName) {
+                Invoke-LoggedNative -Prefix "wsl --unregister $($check.RegName) (limpieza de instalación parcial)" -Command { wsl --unregister $check.RegName } -IgnoreExitCode
+            }
+            Start-Sleep -Seconds 5
+        }
+    }
     if (-not $check.WslName) {
-        throw "Tras 'wsl --install --from-file' la distro NO aparece en 'wsl -l -q'. Revisa el DIAGNÓSTICO impreso arriba (registro/vhdx) y la salida del comando de instalación para la causa raíz."
+        throw "Tras $maxInstallAttempts intento(s) de 'wsl --install --from-file' la distro NO aparece en 'wsl -l -q'. Revisa el DIAGNÓSTICO impreso arriba (registro/vhdx) y la salida del comando de instalación para la causa raíz."
     }
     $distroName = $check.WslName
     Write-Log "  Distro registrada exitosamente como: '$distroName'" "OK"
@@ -471,7 +562,7 @@ EOF
 echo "provision-user: OK"
 '@
 
-    Write-Log "  --- Provisión de usuario dentro de la distro (root) ---" "INFO"
+    Write-Log "  [4/5] Provisión de usuario dentro de la distro (root)" "INFO"
     try {
         $env:CACHYOS_PW = $plainPw
         $env:WSLENV = "CACHYOS_PW"
@@ -487,14 +578,10 @@ echo "provision-user: OK"
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     }
 
-    Write-Log "  --- Verificación final ---" "INFO"
+    Write-Log "  [5/5] Verificación final" "INFO"
     Invoke-LoggedNative -Prefix "wsl --shutdown" -Command { wsl --shutdown } -IgnoreExitCode
     Start-Sleep -Seconds 3
-    $who = (wsl -d $distroName -- whoami 2>&1).Trim()
-    Write-Log "  Usuario default reportado por 'wsl -d $distroName -- whoami': '$who'" "INFO"
-    if ($who -ne $CachyOSUsername) { throw "Usuario default esperado '$CachyOSUsername', se obtuvo '$who'" }
-    Write-Log "  Usuario '$CachyOSUsername' verificado como default en '$distroName'." "OK"
-    Test-CachyOSRegistered | Out-Null
+    Test-CachyOSHealthy -DistroName $distroName -Username $CachyOSUsername
 }
 
 function Step-WriteWslConfig {
@@ -608,11 +695,18 @@ function Step-InstallClaudeWindows {
 
 function Step-ValidateAll {
     $check = Test-CachyOSRegistered
+    $sysState = "N/D (distro no registrada)"
+    if ($check.WslName) {
+        try {
+            $sysState = ((wsl -d $check.WslName -u root -- systemctl is-system-running 2>&1) | Select-Object -Last 1).Trim()
+        } catch { $sysState = "error consultando: $($_.Exception.Message)" }
+    }
     $report = [ordered]@{
         "wsl --version"          = (wsl --version 2>&1 | Select-Object -First 1)
         "distro (wsl -l -v)"     = ((wsl -l -v 2>&1) -join " | ")
         "distro nombre detectado"= (if ($check.WslName) { $check.WslName } else { "NO REGISTRADA" })
         "distro vhdx en disco"   = $check.VhdExists
+        "distro systemd status" = $sysState
         "alacritty --version"    = (& alacritty --version 2>$null)
         "claude --version (win)" = (& claude --version 2>$null)
         ".wslconfig existe"      = (Test-Path (Join-Path $env:UserProfile ".wslconfig"))

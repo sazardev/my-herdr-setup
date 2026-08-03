@@ -22,7 +22,7 @@ auto_switch = false
 # Ordena el panel de agentes por prioridad de atención (quién necesita
 # respuesta) en vez de agrupar por espacio/workspace. Útil con varios
 # agentes corriendo en paralelo.
-agent_panel_sort = "spaces"
+agent_panel_sort = "priority"
 
 # Sin espacio extra entre panes: comparten el borde divisor en vez de tener
 # un gap visual. Máximo aprovechamiento de pantalla en splits.

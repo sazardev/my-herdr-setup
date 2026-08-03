@@ -88,6 +88,28 @@ run_step() {
 pkg_missing() { ! pacman -Qi "$1" &>/dev/null; }
 bin_missing() { ! command -v "$1" &>/dev/null; }
 
+# git necesita user.name/user.email para poder commitear; si el repo de
+# dotfiles (--dotfiles-repo) no trae un .gitconfig con eso, el primer
+# 'git commit' en cualquier clone (gm-erp2, este mismo repo, etc.) falla
+# con "Author identity unknown" sin aviso previo. La derivamos de la cuenta
+# de gh ya autenticada como último recurso (se llama desde step_gh_auth,
+# una vez que gh ya tiene sesión activa).
+ensure_git_identity() {
+  [[ -n "$(git config --global user.email 2>/dev/null)" ]] && return 0
+  local gh_login gh_name gh_email
+  gh_login="$(gh api user --jq '.login' 2>/dev/null)"
+  gh_name="$(gh api user --jq '.name // empty' 2>/dev/null)"
+  gh_email="$(gh api user --jq '.email // empty' 2>/dev/null)"
+  if [[ -z "$gh_login" ]]; then
+    log_warn "  no se pudo derivar identidad de git desde gh -- configúrala a mano: git config --global user.name/user.email"
+    return 0
+  fi
+  git config --global user.name "${gh_name:-$gh_login}"
+  git config --global user.email "${gh_email:-${gh_login}@users.noreply.github.com}"
+  log_warn "  git user.name/user.email no estaban configurados -- los tomé de la cuenta de gh activa ($gh_login)." \
+           " Si prefieres otros: git config --global user.email tu@correo"
+}
+
 # Ceba las credenciales de sudo UNA vez al arrancar y las mantiene vivas en
 # background durante todo el script. Necesario porque con
 # 'curl -fsSL ... | bash' el stdin del script ya lo consume el pipe de curl,
@@ -132,6 +154,7 @@ step_preflight() {
   return 0
 }
 
+WSL_CONF_CHANGED=0
 step_fix_wsl_conf() {
   local tmp; tmp=$(mktemp)
   cat > "$tmp" <<EOF
@@ -153,6 +176,7 @@ EOF
   if ! sudo diff -q "$tmp" /etc/wsl.conf &>/dev/null; then
     sudo cp /etc/wsl.conf "/etc/wsl.conf.bak.$(date +%s)" 2>/dev/null || true
     sudo cp "$tmp" /etc/wsl.conf
+    WSL_CONF_CHANGED=1
     log_warn "  /etc/wsl.conf cambió — corre 'wsl --shutdown' desde Windows y reabre para que systemd/red tomen efecto"
   fi
   rm -f "$tmp"
@@ -307,15 +331,17 @@ step_gh_auth() {
   bin_missing gh && { log_err "gh no instalado"; return 1; }
   if gh auth status &>/dev/null; then
     log_info "  gh ya autenticado"
-    return 0
-  fi
-  if [[ -n "${GH_TOKEN:-}" ]]; then
-    echo "$GH_TOKEN" | gh auth login --with-token
   else
-    log_warn "  gh no autenticado y no hay GH_TOKEN en el entorno — sigue el flujo interactivo (URL + código de un solo uso)"
-    gh auth login -h github.com -p https -w
+    if [[ -n "${GH_TOKEN:-}" ]]; then
+      echo "$GH_TOKEN" | gh auth login --with-token
+    else
+      log_warn "  gh no autenticado y no hay GH_TOKEN en el entorno — sigue el flujo interactivo (URL + código de un solo uso)"
+      gh auth login -h github.com -p https -w
+    fi
   fi
-  gh auth status &>/dev/null
+  gh auth status &>/dev/null || return 1
+  ensure_git_identity
+  return 0
 }
 
 step_zram_and_swap() {
@@ -476,15 +502,23 @@ step_dotfiles() {
 }
 
 step_final_report() {
-  node --version 2>/dev/null | xargs -I{} log_info "  node: {}"
-  pnpm --version 2>/dev/null | xargs -I{} log_info "  pnpm: {}"
-  go version 2>/dev/null | xargs -I{} log_info "  go: {}"
-  docker --version 2>/dev/null | xargs -I{} log_info "  docker: {}"
-  claude --version 2>/dev/null | xargs -I{} log_info "  claude: {}"
-  gh --version 2>/dev/null | head -1 | xargs -I{} log_info "  {}"
+  local v
+  v="$(node --version 2>/dev/null)"          && log_info "  node: $v"
+  v="$(pnpm --version 2>/dev/null)"          && log_info "  pnpm: $v"
+  v="$(go version 2>/dev/null)"              && log_info "  go: $v"
+  v="$(docker --version 2>/dev/null)"        && log_info "  docker: $v"
+  v="$(claude --version 2>/dev/null)"        && log_info "  claude: $v"
+  v="$(gh --version 2>/dev/null | head -1)"  && log_info "  $v"
   log_info "  gm-erp2 en: $GM_ERP2_DIR (rama $GM_ERP2_BRANCH)"
   log_info "  Pendiente manual: 'cd $GM_ERP2_DIR && docker compose up -d' para levantar mongo/redis"
   log_info "  Pendiente manual: cierra sesión y vuelve a entrar para que el grupo 'docker' tome efecto"
+  if [[ "$WSL_CONF_CHANGED" -eq 1 ]]; then
+    log_warn "  ⚠⚠⚠ /etc/wsl.conf cambió en esta corrida ⚠⚠⚠"
+    log_warn "  systemd/docker/red no quedan completos hasta que reinicies WSL:"
+    log_warn "    1) en Windows (PowerShell): wsl --shutdown"
+    log_warn "    2) reabre la terminal de WSL"
+    log_warn "    3) vuelve a correr este script una vez más"
+  fi
   return 0
 }
 

@@ -297,9 +297,16 @@ arriba de este README, en **Quick start**. Notas:
   nombre de distro coincida (`cachyos` en minúsculas).
 - `cachyos-provision.sh` clona `gm-erp2` (default:
   `https://github.com/erpv2/gm-erp2.git`, rama `dev`), corre
-  `corepack enable && pnpm install`, `lefthook install` y
-  `pnpm exec playwright install --with-deps` — el repo queda listo para
-  trabajar, no solo el sistema operativo alrededor.
+  `corepack enable && pnpm install`, `lefthook install` y la instalación de
+  browsers de Playwright — el repo queda listo para trabajar, no solo el
+  sistema operativo alrededor. Playwright no soporta `--with-deps` en
+  Arch/CachyOS (esa flag solo sabe usar `apt`), así que el script instala a
+  mano el equivalente en `pacman` de las libs que piden Chromium/Firefox/
+  WebKit y, si aun así la validación de host de Playwright se queja
+  (compara contra nombres de `.so` exactos de Ubuntu que en Arch no
+  existen bajo ese nombre aunque el equivalente real sí esté instalado),
+  cae a instalar saltándose esa validación puntual — confirmado con un
+  browser real lanzando y renderizando en una CachyOS-WSL real.
 - El binario `herdr` en sí y el repo de dotfiles personales (`.zshrc`,
   `.gitconfig`) no se pueden descargar de un origen público — pásalos por
   parámetro (`--herdr-binary`, `--dotfiles-repo`) o el script deja
@@ -314,6 +321,45 @@ arriba de este README, en **Quick start**. Notas:
   no hay certeza de cuál es el repo real en GitHub) y para
   `lazyazure`/`portainer-tui` (`go install`, comentados hasta confirmar
   el import path).
+- `step_gh_auth` deriva `git config --global user.name/user.email` de la
+  cuenta de `gh` ya autenticada si no vienen ya seteados por tu
+  `.gitconfig` (vía `--dotfiles-repo`). Sin esto, el primer `git commit`
+  en cualquier clone truena con `Author identity unknown` sin aviso
+  previo — ya pasó en una corrida real.
+
+### Gotchas al replicar en más AVDs/VMs (no se pueden meter en el script)
+
+Esto es responsabilidad de quien corre el script en cada máquina nueva,
+confirmado a mano en una AVD real:
+
+- **Cuenta de `gh` activa**: si tienes más de una cuenta logueada
+  (`gh auth login` varias veces, ej. tu cuenta de trabajo + tu cuenta
+  personal `sazardev`), el `credential.helper` de git (`!gh auth
+  git-credential`, seteado por `step_git_config`) usa **la que esté
+  marcada `Active account: true`** en `gh auth status` — no la primera
+  que autenticaste. Para clonar/pushear repos privados de tu org de
+  trabajo (ej. `erpv2/gm-erp2`) necesitas esa cuenta activa; si la
+  cambias a `sazardev` para pushear a un repo personal (ej. este mismo
+  `my-herdr-setup`), **regrésala después** con
+  `gh auth switch --hostname github.com --user <cuenta-de-trabajo>` o el
+  siguiente `clone`/`pull` de `gm-erp2` falla con `Repository not
+  found` aunque el repo exista y tengas acceso — el token activo
+  simplemente no es el correcto.
+- **Primera corrida en máquina en blanco**: `fix_wsl_conf` escribe
+  `/etc/wsl.conf` (activa `systemd`) la primera vez. Hasta que no corras
+  `wsl --shutdown` desde Windows y reabras la terminal, systemd no es
+  PID 1 todavía — Docker, el bus de usuario, etc. quedan a medias. El
+  script ya lo detecta y no aborta (avisa y sigue), pero **necesitas
+  correrlo dos veces**: una para escribir `wsl.conf`, reiniciar WSL, y
+  otra para que los pasos que dependen de systemd terminen de verdad. Si
+  `wsl.conf` cambió en la corrida, el resumen final lo repite en
+  mayúsculas para que no se pierda en medio del log.
+- **`git_config` en `FAIL` es esperado**: la extensión `kudohamu/gh-graph`
+  de `gh` no siempre instala (nombre/disponibilidad cambia); el script la
+  marca como fallo del step aunque el resto de `git_config` (merge style,
+  credential helper, extensiones que sí instalaron) haya salido bien. No
+  es bloqueante, es el mismo diseño que usa `aur_packages` para fallos
+  parciales.
 
 ## Qué NO está en este repo (a propósito)
 

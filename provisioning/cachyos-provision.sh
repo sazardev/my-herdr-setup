@@ -194,7 +194,16 @@ step_aur_packages() {
 }
 
 step_node_globals() {
-  sudo npm install -g pnpm node-gyp corepack @anthropic-ai/claude-code
+  sudo npm install -g pnpm node-gyp corepack
+  # @anthropic-ai/claude-code vía npm -g falla en este entorno: npm bloquea su script de
+  # postinstall (install.cjs, el que baja el binario nativo) por su política de
+  # allow-scripts, dejando un shim roto ("claude native binary not installed"). El
+  # instalador oficial standalone no depende de ese postinstall y deja el binario listo
+  # directo en ~/.local/bin.
+  if bin_missing claude; then
+    curl -fsSL https://claude.ai/install.sh | bash
+  fi
+  grep -q '.local/bin' ~/.zshrc 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 }
 
 step_go_tools() {

@@ -91,8 +91,18 @@ bin_missing() { ! command -v "$1" &>/dev/null; }
 # ---------- pasos ----------
 
 step_preflight() {
-  grep -qi cachyos /etc/os-release || { log_err "No parece ser CachyOS"; return 1; }
-  grep -qi microsoft /proc/version || { log_warn "No parece WSL, continúo igual"; }
+  if [[ -r /etc/os-release ]]; then
+    if ! grep -qi cachyos /etc/os-release && ! grep -qi arch /etc/os-release; then
+      bin_missing pacman && { log_err "No parece ser CachyOS"; return 1; }
+      log_warn "  /etc/os-release no menciona CachyOS/Arch, pero hay pacman -- continúo"
+    fi
+  else
+    # rootfs recién extraído del .wsl: /etc/os-release todavía no existe hasta el primer
+    # 'pacman -Syu' (lo instala el paquete 'filesystem'). pacman ya presente alcanza como señal.
+    bin_missing pacman && { log_err "No existe /etc/os-release y no hay pacman -- no parece CachyOS"; return 1; }
+    log_warn "  /etc/os-release no existe todavía (rootfs recién extraído) -- detectado CachyOS/Arch via pacman, continúo"
+  fi
+  grep -qi microsoft /proc/version || log_warn "No parece WSL, continúo igual"
   curl -fsS --max-time 5 https://archlinux.org >/dev/null || { log_err "Sin conectividad a internet"; return 1; }
   return 0
 }
@@ -125,10 +135,22 @@ EOF
 
 step_fix_systemd_user_session() {
   local uid; uid=$(id -u)
+  if [[ ! -d /run/systemd/system ]]; then
+    log_warn "  systemd todavía no es PID 1 en esta sesión (wsl.conf se acaba de escribir) -- corre 'wsl --shutdown' desde Windows, reabre, y vuelve a correr el script; no es un error bloqueante"
+    return 0
+  fi
   sudo systemctl unmask "user@${uid}.service" 2>/dev/null || true
   sudo loginctl enable-linger "$USER" 2>/dev/null || true
   sudo systemctl start "user@${uid}.service" 2>/dev/null || true
-  systemctl --user status &>/dev/null
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+  export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+  if systemctl --user status &>/dev/null; then
+    return 0
+  fi
+  # 'curl | bash' corre en una shell no interactiva sin bus de sesión propio; el bus del usuario
+  # ya quedó habilitado/arrancado arriba y estará disponible en la siguiente sesión (login/wsl nueva).
+  log_warn "  'systemctl --user' no responde en esta shell no interactiva -- ya quedó habilitado, se validará solo en tu próxima sesión"
+  return 0
 }
 
 step_system_update() {
@@ -146,7 +168,7 @@ step_install_yay() {
 step_base_packages() {
   sudo pacman -S --needed --noconfirm \
     base-devel git git-delta lazygit \
-    nodejs-lts-jod python-pip python-pipx uv go \
+    nodejs-lts-jod npm python-pip python-pipx uv go \
     docker docker-buildx docker-compose \
     zsh neovim jq fzf fd bat eza zoxide tree yazi tealdeer navi w3m htop btop glances \
     kubectl httpie

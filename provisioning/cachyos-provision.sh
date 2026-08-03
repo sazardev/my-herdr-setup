@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # cachyos-provision.sh — provisioning idempotente del entorno gm-erp2 dentro de CachyOS-WSL
-# Version: 1.1.0
+# Version: 1.2.0
 # Uso:
 #   ./cachyos-provision.sh
 #   GH_TOKEN=ghp_xxx ./cachyos-provision.sh          # gh auth login no interactivo
@@ -11,7 +11,7 @@
 
 set -uo pipefail  # sin -e: los pasos se controlan explícitamente para no abortar todo el script
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 DOTFILES_REPO=""
 HERDR_BINARY=""
 ONLY=""
@@ -87,6 +87,31 @@ run_step() {
 
 pkg_missing() { ! pacman -Qi "$1" &>/dev/null; }
 bin_missing() { ! command -v "$1" &>/dev/null; }
+
+# Ceba las credenciales de sudo UNA vez al arrancar y las mantiene vivas en
+# background durante todo el script. Necesario porque con
+# 'curl -fsSL ... | bash' el stdin del script ya lo consume el pipe de curl,
+# así que si un 'sudo' pide contraseña a mitad del script no tiene de dónde
+# leerla y falla con "a terminal is required". Se lee del tty real (/dev/tty)
+# en vez de stdin, que sigue disponible aunque stdin esté ocupado.
+SUDO_KEEPALIVE_PID=""
+prime_sudo() {
+  sudo -n true 2>/dev/null && { log_info "sudo ya autenticado (cacheado)"; }
+  if ! sudo -n true 2>/dev/null; then
+    if [[ -r /dev/tty ]]; then
+      log_info "este script necesita sudo para varios pasos -- pide tu contraseña una sola vez:"
+      sudo -v < /dev/tty || { log_err "no se pudo autenticar sudo"; return 1; }
+    else
+      log_err "no hay tty disponible para pedir la contraseña de sudo (¿corriendo sin terminal?)." \
+              " Corre el script en una terminal real, no completamente desatendido."
+      return 1
+    fi
+  fi
+  # keep-alive: refresca el timestamp de sudo cada 60s hasta que el script termine
+  ( while true; do sudo -n -v 2>/dev/null; sleep 60; done ) &
+  SUDO_KEEPALIVE_PID=$!
+  trap '[[ -n "$SUDO_KEEPALIVE_PID" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' EXIT
+}
 
 # ---------- pasos ----------
 
@@ -233,8 +258,9 @@ step_zsh_stack() {
     [zsh-completions]="https://github.com/zsh-users/zsh-completions"
     [zsh-history-substring-search]="https://github.com/zsh-users/zsh-history-substring-search"
   )
-  for name in "${!plugins[@]}"; do
-    [[ -d "$custom/plugins/$name" ]] || git clone --depth 1 "${plugins[$name]}" "$custom/plugins/$name"
+  local plugin_name
+  for plugin_name in "${!plugins[@]}"; do
+    [[ -d "$custom/plugins/$plugin_name" ]] || git clone --depth 1 "${plugins[$plugin_name]}" "$custom/plugins/$plugin_name"
   done
   [[ -d "$custom/themes/powerlevel10k" ]] || git clone --depth 1 https://github.com/romkatv/powerlevel10k.git "$custom/themes/powerlevel10k"
   bin_missing oh-my-posh && curl -s https://ohmyposh.dev/install.sh | bash -s
@@ -293,14 +319,14 @@ step_gh_auth() {
 }
 
 step_zram_and_swap() {
-  sudo pacman -S --needed --noconfirm zram-generator
-  sudo tee /etc/systemd/zram-generator.conf >/dev/null <<EOF
+  sudo pacman -S --needed --noconfirm zram-generator || return 1
+  sudo tee /etc/systemd/zram-generator.conf >/dev/null <<EOF || return 1
 [zram0]
 zram-size = ${ZRAM_SIZE_MB}
 compression-algorithm = zstd
 EOF
 
-  sudo tee /usr/local/sbin/gm-erp2-ensure-swap.sh >/dev/null <<EOF
+  sudo tee /usr/local/sbin/gm-erp2-ensure-swap.sh >/dev/null <<EOF || return 1
 #!/usr/bin/env bash
 set -euo pipefail
 SWAPFILE=/swapfile
@@ -311,9 +337,13 @@ if [[ ! -f "\$SWAPFILE" ]]; then
 fi
 swapon --show=NAME --noheadings | grep -qx "\$SWAPFILE" || swapon "\$SWAPFILE"
 EOF
-  sudo chmod +x /usr/local/sbin/gm-erp2-ensure-swap.sh
-  sudo /usr/local/sbin/gm-erp2-ensure-swap.sh
+  sudo chmod +x /usr/local/sbin/gm-erp2-ensure-swap.sh || return 1
+  sudo /usr/local/sbin/gm-erp2-ensure-swap.sh || return 1
+  # el restart del generador de zram sí puede fallar sin gravedad (ej. ya está
+  # activo y systemd no permite "restart" de un oneshot en cierto estado) --
+  # eso es lo único que se tolera con || true, no el resto del setup.
   sudo systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || true
+  return 0
 }
 
 step_validate_resources() {
@@ -400,19 +430,31 @@ step_gm_erp2_hooks() {
 
 step_gm_erp2_playwright() {
   [[ -d "$GM_ERP2_DIR/.git" ]] || return 1
-  # Playwright solo sabe auto-instalar deps de sistema (--with-deps) en distros basados
-  # en apt/dnf; en Arch/CachyOS no existe ese soporte y truena buscando apt-get. Instalamos
-  # a mano el equivalente en pacman de las libs que Chromium/Firefox/WebKit piden en
-  # runtime, y luego solo bajamos los binarios de los navegadores (sin --with-deps).
-  sudo pacman -S --needed --noconfirm \
-    nss nspr atk at-spi2-atk at-spi2-core cups libdrm mesa \
-    libxcomposite libxdamage libxfixes libxrandr libxkbcommon \
-    pango cairo gtk3 gdk-pixbuf2 alsa-lib dbus \
-    libxshmfence libxi libxtst libxext libx11 libxcb expat glib2
-  if ! (cd "$GM_ERP2_DIR" && pnpm exec playwright install); then
-    log_warn "  playwright install falló incluso con las libs de pacman -- corre 'pnpm exec playwright install-deps' manualmente en $GM_ERP2_DIR para ver qué falta exactamente"
-    return 1
-  fi
+  (
+    cd "$GM_ERP2_DIR" || exit 1
+    if grep -qi 'cachyos\|arch' /etc/os-release 2>/dev/null; then
+      # --with-deps invoca apt-get (no existe en Arch/CachyOS). Instalamos a
+      # mano el equivalente en pacman de las libs que Chromium/Firefox/WebKit
+      # piden en runtime y luego bajamos los navegadores sin --with-deps.
+      log_warn "  Arch/CachyOS: --with-deps no aplica (usa apt) -- instalo las libs vía pacman primero"
+      sudo pacman -S --needed --noconfirm \
+        nss nspr atk at-spi2-atk at-spi2-core cups libdrm mesa \
+        libxcomposite libxdamage libxfixes libxrandr libxkbcommon \
+        pango cairo gtk3 gdk-pixbuf2 alsa-lib dbus \
+        libxshmfence libxi libxtst libxext libx11 libxcb expat glib2
+      if ! pnpm exec playwright install; then
+        # La validación de host de Playwright compara contra nombres de .so
+        # exactos de Ubuntu; en Arch el equivalente real ya está instalado
+        # arriba pero con otro nombre, así que puede seguir marcando error
+        # aunque los browsers funcionen (confirmado lanzando chromium real
+        # tras instalar así). Como último recurso, saltamos esa validación.
+        log_warn "  playwright install falló incluso con las libs de pacman -- reintento saltando la validación de host"
+        PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 pnpm exec playwright install
+      fi
+    else
+      pnpm exec playwright install --with-deps
+    fi
+  )
 }
 
 step_dotfiles() {
@@ -448,6 +490,8 @@ step_final_report() {
 
 # ---------- main ----------
 log_info "=== cachyos-provision.sh v$SCRIPT_VERSION ==="
+
+prime_sudo || { log_err "no se pudo cebar sudo -- abortando (casi todos los pasos lo necesitan)"; exit 1; }
 
 run_step "preflight"                step_preflight
 run_step "fix_wsl_conf"             step_fix_wsl_conf

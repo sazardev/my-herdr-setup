@@ -705,58 +705,72 @@ autoMemoryReclaim=gradual
 }
 
 function Step-InstallAlacritty {
+    Write-Log "  [1/4] Verificando si Alacritty ya está instalado (winget list, puede tardar)..." "INFO"
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         throw "winget no está disponible en este host; instálalo manualmente (App Installer desde Microsoft Store) y reintenta."
     }
     $installed = winget list --id Alacritty.Alacritty -e 2>$null | Select-String "Alacritty"
     $installedBool = [bool]$installed
     Write-Log "  Alacritty ya instalado según winget: $installedBool" "INFO"
+
+    Write-Log "  [2/4] Instalación vía winget" "INFO"
     if (-not $installed -or $Force) {
         Invoke-LoggedNative -Prefix "winget install Alacritty.Alacritty" -Command {
             winget install --id Alacritty.Alacritty -e --silent --accept-package-agreements --accept-source-agreements
         }
+    } else {
+        Write-Log "  Ya estaba instalado y no se pasó -Force; se omite 'winget install'." "OK"
     }
 
-    # Config real versionada (sazardev/my-alacritty-setup), no una genérica inventada:
-    # JetBrainsMono NFM, tema Gruvbox, keybindings de zoom/maximize/shift+enter, etc.
-    $tmp = Join-Path $env:TEMP "gm-erp2-alacritty-setup"
-    if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
-    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-    $zipPath = Join-Path $tmp "repo.zip"
-    Write-Log "  Descargando config de sazardev/my-alacritty-setup..." "INFO"
-    Invoke-WebRequest -Uri "https://github.com/sazardev/my-alacritty-setup/archive/refs/heads/main.zip" -OutFile $zipPath
-    Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
-    $repoDir = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like "my-alacritty-setup-*" } | Select-Object -First 1
-    if (-not $repoDir) { throw "No se pudo extraer sazardev/my-alacritty-setup" }
-
-    $cfgDir = Join-Path $env:APPDATA "alacritty"
-    New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
-    foreach ($f in @("alacritty.toml", "local.toml")) {
-        $src = Join-Path $repoDir.FullName $f
-        $dst = Join-Path $cfgDir $f
-        if (Test-Path $dst) {
-            $ts = [int](Get-Date -UFormat %s)
-            $bak = "$dst.bak.$ts"
-            Copy-Item $dst $bak -Force
-            Write-Log "  Backup de $f -> $bak" "INFO"
-        }
-        Copy-Item $src $dst -Force
-        Write-Log "  Copiado $f -> $dst" "INFO"
-    }
-    $themesSrc = Join-Path $repoDir.FullName "themes"
-    if (Test-Path $themesSrc) { Copy-Item $themesSrc $cfgDir -Recurse -Force }
-
+    Write-Log "  [3/4] Config real (sazardev/my-alacritty-setup)" "INFO"
     # el repo asume el nombre de distro "CachyOS"; usamos el nombre REAL con el que quedó
     # registrada (puede no ser exactamente "CachyOS" según el .wsl instalado)
     $distroName = Get-CachyDistroName
+    $cfgDir = Join-Path $env:APPDATA "alacritty"
     $localTomlPath = Join-Path $cfgDir "local.toml"
-    if (Test-Path $localTomlPath) {
-        (Get-Content $localTomlPath -Raw) -replace '"CachyOS"', "`"$distroName`"" | Set-Content $localTomlPath -Encoding UTF8
-        Write-Log "  local.toml ajustado para usar la distro '$distroName' (detectada en 'wsl -l -q')" "OK"
+    $yaConfigurado = (Test-Path $localTomlPath) -and ((Get-Content $localTomlPath -Raw) -match [regex]::Escape($distroName))
+    if ($yaConfigurado -and -not $Force) {
+        Write-Log "  Config de Alacritty ya presente en $cfgDir y ya apunta a la distro '$distroName'; se omite la descarga (usa -Force para re-hacer)." "OK"
     } else {
-        Write-Log "  ADVERTENCIA: no se encontró local.toml en $cfgDir tras copiar el repo; Alacritty no tendrá shell configurado." "WARN"
+        # Config real versionada (sazardev/my-alacritty-setup), no una genérica inventada:
+        # JetBrainsMono NFM, tema Gruvbox, keybindings de zoom/maximize/shift+enter, etc.
+        $tmp = Join-Path $env:TEMP "gm-erp2-alacritty-setup"
+        if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        $zipPath = Join-Path $tmp "repo.zip"
+        Invoke-WithRetry -Prefix "descarga de sazardev/my-alacritty-setup" -Action {
+            Write-Log "  Descargando config de sazardev/my-alacritty-setup..." "INFO"
+            Invoke-WebRequest -Uri "https://github.com/sazardev/my-alacritty-setup/archive/refs/heads/main.zip" -OutFile $zipPath
+        } | Out-Null
+        Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
+        $repoDir = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like "my-alacritty-setup-*" } | Select-Object -First 1
+        if (-not $repoDir) { throw "No se pudo extraer sazardev/my-alacritty-setup" }
+
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        foreach ($f in @("alacritty.toml", "local.toml")) {
+            $src = Join-Path $repoDir.FullName $f
+            $dst = Join-Path $cfgDir $f
+            if (Test-Path $dst) {
+                $ts = [int](Get-Date -UFormat %s)
+                $bak = "$dst.bak.$ts"
+                Copy-Item $dst $bak -Force
+                Write-Log "  Backup de $f -> $bak" "INFO"
+            }
+            Copy-Item $src $dst -Force
+            Write-Log "  Copiado $f -> $dst" "INFO"
+        }
+        $themesSrc = Join-Path $repoDir.FullName "themes"
+        if (Test-Path $themesSrc) { Copy-Item $themesSrc $cfgDir -Recurse -Force }
+
+        if (Test-Path $localTomlPath) {
+            (Get-Content $localTomlPath -Raw) -replace '"CachyOS"', "`"$distroName`"" | Set-Content $localTomlPath -Encoding UTF8
+            Write-Log "  local.toml ajustado para usar la distro '$distroName' (detectada en 'wsl -l -q')" "OK"
+        } else {
+            Write-Log "  ADVERTENCIA: no se encontró local.toml en $cfgDir tras copiar el repo; Alacritty no tendrá shell configurado." "WARN"
+        }
     }
 
+    Write-Log "  [4/4] Verificación final" "INFO"
     $ver = & alacritty --version 2>$null
     Write-Log "  Alacritty instalado: $ver ; config real de sazardev/my-alacritty-setup en $cfgDir" "OK"
     Write-Log "  Verifica que la fuente 'JetBrainsMono NFM' quedó registrada (ver README del repo para el chequeo con System.Drawing)" "INFO"
@@ -767,6 +781,7 @@ function Step-InstallClaudeWindows {
         Write-Log "  InstallClaudeOnWindows=false, se omite este paso." "INFO"
         return
     }
+    Write-Log "  [1/3] Node.js (requerido por npm)" "INFO"
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
         Write-Log "  Node.js no encontrado, instalando OpenJS.NodeJS.LTS via winget..." "INFO"
         Invoke-LoggedNative -Prefix "winget install OpenJS.NodeJS.LTS" -Command {
@@ -778,9 +793,18 @@ function Step-InstallClaudeWindows {
     } else {
         Write-Log "  Node.js ya presente: $(node --version 2>$null)" "INFO"
     }
-    Invoke-LoggedNative -Prefix "npm install -g @anthropic-ai/claude-code" -Command {
-        npm install -g @anthropic-ai/claude-code
+
+    Write-Log "  [2/3] Claude Code (npm global)" "INFO"
+    $claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
+    if ($claudeCmd -and -not $Force) {
+        Write-Log "  'claude' ya está en PATH ($($claudeCmd.Source)); se omite 'npm install -g' (usa -Force para reinstalar/actualizar)." "OK"
+    } else {
+        Invoke-LoggedNative -Prefix "npm install -g @anthropic-ai/claude-code" -Command {
+            npm install -g @anthropic-ai/claude-code
+        }
     }
+
+    Write-Log "  [3/3] Verificación final" "INFO"
     $ver = & claude --version 2>$null
     Write-Log "  Claude Code (Windows nativo): $ver" "OK"
 }

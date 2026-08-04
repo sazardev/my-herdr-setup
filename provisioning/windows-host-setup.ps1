@@ -706,20 +706,23 @@ autoMemoryReclaim=gradual
 }
 
 function Step-InstallAlacritty {
-    Write-Log "  [1/4] Verificando si Alacritty ya está instalado (winget list, puede tardar)..." "INFO"
+    Write-Log "  [1/4] Verificando si Alacritty ya está instalado" "INFO"
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         throw "winget no está disponible en este host; instálalo manualmente (App Installer desde Microsoft Store) y reintenta."
     }
-    $listOutput = Invoke-LoggedNative -Prefix "winget list Alacritty.Alacritty" -Command { winget list --id Alacritty.Alacritty -e } -IgnoreExitCode
-    $installed = $listOutput | Select-String "Alacritty"
+    # Chequeo directo en el sistema (PATH), no 'winget list': winget list puede colgarse minutos
+    # sincronizando su índice de fuentes en hosts corporativos/AVD con red restringida.
+    $installed = Get-Command alacritty -ErrorAction SilentlyContinue
     $installedBool = [bool]$installed
-    Write-Log "  Alacritty ya instalado según winget: $installedBool" "INFO"
+    Write-Log "  Alacritty ya en PATH: $installedBool $(if ($installed) { "($($installed.Source))" })" "INFO"
 
     Write-Log "  [2/4] Instalación vía winget" "INFO"
     if (-not $installed -or $Force) {
         Invoke-LoggedNative -Prefix "winget install Alacritty.Alacritty" -Command {
             winget install --id Alacritty.Alacritty -e --silent --accept-package-agreements --accept-source-agreements
         }
+        # refresca PATH de la sesión actual sin reabrir la terminal (igual que con Node.js)
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
     } else {
         Write-Log "  Ya estaba instalado y no se pasó -Force; se omite 'winget install'." "OK"
     }

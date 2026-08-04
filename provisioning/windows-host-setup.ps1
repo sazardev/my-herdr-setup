@@ -9,12 +9,16 @@
     .\windows-host-setup.ps1
     .\windows-host-setup.ps1 -Force                  # re-ejecuta todos los pasos aunque ya estén hechos
     .\windows-host-setup.ps1 -Only InstallCachyOS     # corre solo un paso
-    .\windows-host-setup.ps1 -WslMemoryGB 20 -WslProcessors 18 -WslSwapGB 0
+    .\windows-host-setup.ps1 -WslMemoryGB 20 -WslProcessors 18 -WslSwapGB 0   # fuerza valores en vez de autodetectar
     .\windows-host-setup.ps1 -CachyOSUsername jdoe    # fuerza un usuario Linux distinto al detectado
 
-  Script genérico para cualquier dev: por defecto, $CachyOSUsername NO está fijo a una persona --
-  se deriva del usuario de Windows que corre el script ($env:USERNAME), saneado a un username
-  Linux válido. Cada quien obtiene su propio usuario dentro de CachyOS con su propio nombre.
+  Script genérico para cualquier dev, no asume el hardware/usuario de una máquina en particular:
+  - $CachyOSUsername se deriva del usuario de Windows que corre el script ($env:USERNAME), saneado
+    a un username Linux válido. Cada quien obtiene su propio usuario dentro de CachyOS.
+  - $WslProcessors/$WslMemoryGB se autodetectan de los CPUs lógicos y la RAM real del host (dejando
+    margen para Windows), en vez de un valor fijo que puede exceder hosts más chicos (AVDs con menos
+    vCPUs/RAM que la máquina original, p.ej. 'wsl2.processors cannot exceed the number of logical
+    processors on the system').
 #>
 
 [CmdletBinding()]
@@ -22,8 +26,8 @@ param(
     [string]   $CachyOSUsername   = (($env:USERNAME) -replace '[^a-zA-Z0-9]', '').ToLower(),
     [SecureString] $CachyOSPassword,
     [string[]] $NerdFonts         = @("JetBrainsMono"),
-    [int]      $WslMemoryGB       = 20,
-    [int]      $WslProcessors     = 18,
+    [int]      $WslMemoryGB       = [Math]::Max(4, [Math]::Floor(((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB) * 0.7)),
+    [int]      $WslProcessors     = [Math]::Max(2, [Environment]::ProcessorCount - 2),
     [int]      $WslSwapGB         = 0,   # 0 a propósito: el swap real vive dentro de CachyOS (provision-cachyos.sh)
     [switch]   $Force,
     [string]   $Only,
@@ -815,6 +819,7 @@ Write-Log "Identidad del proceso: $($idCheck.Name) (elevado)" "INFO"
 Write-Log "Usuario interactivo esperado: $($env:USERDOMAIN)\$($env:USERNAME) | UserProfile: $env:UserProfile" "INFO"
 $osVersionString = [System.Environment]::OSVersion.VersionString
 Write-Log "Host: $env:COMPUTERNAME | PS: $($PSVersionTable.PSVersion) | OS: $osVersionString" "INFO"
+Write-Log "CachyOSUsername='$CachyOSUsername' | WslProcessors=$WslProcessors | WslMemoryGB=$WslMemoryGB (autodetectados del host salvo que se hayan pasado explícitos por parámetro)" "INFO"
 if ($idCheck.Name -notlike "*\$($env:USERNAME)") {
     Write-Log "ADVERTENCIA: la identidad elevada ('$($idCheck.Name)') no coincide con el usuario interactivo ('$($env:USERNAME)'). Si tu Windows pide credenciales de OTRA cuenta admin al elevar, WSL/CachyOS quedará registrado bajo el perfil de esa cuenta y no aparecerá para tu usuario normal." "WARN"
 }

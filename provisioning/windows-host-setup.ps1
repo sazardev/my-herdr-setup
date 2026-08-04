@@ -494,12 +494,84 @@ function Test-CachyOSHealthy {
     Write-Log "  Grupo 'wheel' y shell 'zsh' verificados para '$Username' en '$DistroName'." "OK"
 }
 
+function Invoke-CachyOSUserProvision {
+    # Crea (si no existe) y configura el usuario Linux dentro de la distro: grupo wheel, shell zsh,
+    # password, y '[user] default' en wsl.conf. Se usa tanto tras una instalación fresca como cuando
+    # la distro ya existía pero es la primera vez que ESTE usuario de Windows la usa (username genérico
+    # por dev: la distro puede haber sido provisionada originalmente para otra persona).
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$Username,
+        [SecureString]$Password
+    )
+    if (-not $Password) {
+        $Password = Read-Host -AsSecureString "Password para el usuario '$Username' en CachyOS"
+    }
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+    $plainPw = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+
+    $bashProvision = @'
+set -euo pipefail
+USERNAME="$1"
+id -u "$USERNAME" >/dev/null 2>&1 || useradd -m -G wheel -s /usr/bin/zsh "$USERNAME"
+echo "$USERNAME:$CACHYOS_PW" | chpasswd
+echo '%wheel ALL=(ALL:ALL) ALL' | tee /etc/sudoers.d/wheel >/dev/null
+chmod 440 /etc/sudoers.d/wheel
+visudo -c
+
+UID_NUM=$(id -u "$USERNAME")
+systemctl unmask "user@${UID_NUM}.service" 2>/dev/null || true
+loginctl enable-linger "$USERNAME" 2>/dev/null || true
+
+cat > /etc/wsl.conf <<EOF
+[boot]
+systemd = true
+
+[network]
+generateHosts = true
+generateResolvConf = true
+
+[interop]
+enabled = true
+appendWindowsPath = false
+
+[user]
+default = $USERNAME
+EOF
+echo "provision-user: OK"
+'@
+
+    Write-Log "  Provisión de usuario '$Username' dentro de '$DistroName' (root)" "INFO"
+    try {
+        $env:CACHYOS_PW = $plainPw
+        $env:WSLENV = "CACHYOS_PW"
+        $provisionOut = $bashProvision | wsl -d $DistroName -u root -- bash -s -- $Username 2>&1
+        $code = $LASTEXITCODE
+        $provisionOut | ForEach-Object { Write-Log "    [provision-user] $($_.ToString())" "INFO" }
+        Write-Log "  Script de provisión de usuario -> exit code: $code" "INFO"
+        if ($code -ne 0) { throw "El script de provisión de usuario terminó con código $code" }
+    }
+    finally {
+        Remove-Item Env:\CACHYOS_PW -ErrorAction SilentlyContinue
+        $plainPw = $null
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+
+    Invoke-LoggedNative -Prefix "wsl --shutdown" -Command { wsl --shutdown } -IgnoreExitCode
+    Start-Sleep -Seconds 3
+}
+
 function Step-InstallCachyOS {
     Write-Log "  [1/5] Chequeos previos" "INFO"
     $distroName = Get-CachyDistroName
     $existing = (wsl -l -q 2>$null) | ForEach-Object { $_ -replace "`0","" }
     if (($existing | Where-Object { $_ -ieq "cachyos" }) -and -not $Force) {
         Write-Log "  Distro CachyOS ya existe (nombre registrado: '$distroName'), se omite instalación (usa -Force para re-hacer)." "INFO"
+        wsl -d $distroName -- id -u $CachyOSUsername 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log "  El usuario '$CachyOSUsername' no existe todavía dentro de '$distroName' (la distro fue provisionada para alguien más, o es la primera vez que este perfil de Windows la usa); se crea ahora." "WARN"
+            Invoke-CachyOSUserProvision -DistroName $distroName -Username $CachyOSUsername -Password $CachyOSPassword
+        }
         Test-CachyOSHealthy -DistroName $distroName -Username $CachyOSUsername
         return
     }
@@ -593,62 +665,10 @@ function Step-InstallCachyOS {
     $distroName = $check.WslName
     Write-Log "  Distro registrada exitosamente como: '$distroName'" "OK"
 
-    if (-not $CachyOSPassword) {
-        $CachyOSPassword = Read-Host -AsSecureString "Password para el usuario '$CachyOSUsername' en CachyOS"
-    }
-    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($CachyOSPassword)
-    $plainPw = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-
-    $bashProvision = @'
-set -euo pipefail
-USERNAME="$1"
-id -u "$USERNAME" >/dev/null 2>&1 || useradd -m -G wheel -s /usr/bin/zsh "$USERNAME"
-echo "$USERNAME:$CACHYOS_PW" | chpasswd
-echo '%wheel ALL=(ALL:ALL) ALL' | tee /etc/sudoers.d/wheel >/dev/null
-chmod 440 /etc/sudoers.d/wheel
-visudo -c
-
-UID_NUM=$(id -u "$USERNAME")
-systemctl unmask "user@${UID_NUM}.service" 2>/dev/null || true
-loginctl enable-linger "$USERNAME" 2>/dev/null || true
-
-cat > /etc/wsl.conf <<EOF
-[boot]
-systemd = true
-
-[network]
-generateHosts = true
-generateResolvConf = true
-
-[interop]
-enabled = true
-appendWindowsPath = false
-
-[user]
-default = $USERNAME
-EOF
-echo "provision-user: OK"
-'@
-
     Write-Log "  [4/5] Provisión de usuario dentro de la distro (root)" "INFO"
-    try {
-        $env:CACHYOS_PW = $plainPw
-        $env:WSLENV = "CACHYOS_PW"
-        $provisionOut = $bashProvision | wsl -d $distroName -u root -- bash -s -- $CachyOSUsername 2>&1
-        $code = $LASTEXITCODE
-        $provisionOut | ForEach-Object { Write-Log "    [provision-user] $_" "INFO" }
-        Write-Log "  Script de provisión de usuario -> exit code: $code" "INFO"
-        if ($code -ne 0) { throw "El script de provisión de usuario terminó con código $code" }
-    }
-    finally {
-        Remove-Item Env:\CACHYOS_PW -ErrorAction SilentlyContinue
-        $plainPw = $null
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-    }
+    Invoke-CachyOSUserProvision -DistroName $distroName -Username $CachyOSUsername -Password $CachyOSPassword
 
     Write-Log "  [5/5] Verificación final" "INFO"
-    Invoke-LoggedNative -Prefix "wsl --shutdown" -Command { wsl --shutdown } -IgnoreExitCode
-    Start-Sleep -Seconds 3
     Test-CachyOSHealthy -DistroName $distroName -Username $CachyOSUsername
 }
 

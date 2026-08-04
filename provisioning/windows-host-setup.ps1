@@ -118,10 +118,10 @@ function Invoke-LoggedNative {
     }).AddArgument($Prefix).AddArgument($HeartbeatSeconds).AddArgument($Script:LogFile)
     [void]$hbPs.BeginInvoke()
 
-    $lineCount = 0
+    $lines = [System.Collections.Generic.List[string]]::new()
     try {
         & $Command 2>&1 | ForEach-Object {
-            $lineCount++
+            $lines.Add($_.ToString())
             Write-Log "    [$Prefix] $_" "INFO"
         }
         $code = $LASTEXITCODE
@@ -133,13 +133,14 @@ function Invoke-LoggedNative {
         $hbRunspace.Dispose()
     }
 
-    if ($lineCount -eq 0) {
+    if ($lines.Count -eq 0) {
         Write-Log "    [$Prefix] (sin salida)" "INFO"
     }
     Write-Log "  << $Prefix (exit code: $code)" "INFO"
     if (-not $IgnoreExitCode -and $code -ne 0) {
         throw "$Prefix terminó con exit code $code"
     }
+    return $lines
 }
 
 function Invoke-WithRetry {
@@ -709,7 +710,8 @@ function Step-InstallAlacritty {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         throw "winget no está disponible en este host; instálalo manualmente (App Installer desde Microsoft Store) y reintenta."
     }
-    $installed = winget list --id Alacritty.Alacritty -e 2>$null | Select-String "Alacritty"
+    $listOutput = Invoke-LoggedNative -Prefix "winget list Alacritty.Alacritty" -Command { winget list --id Alacritty.Alacritty -e } -IgnoreExitCode
+    $installed = $listOutput | Select-String "Alacritty"
     $installedBool = [bool]$installed
     Write-Log "  Alacritty ya instalado según winget: $installedBool" "INFO"
 

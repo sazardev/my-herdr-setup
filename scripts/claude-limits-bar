@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""claude-limits-bar — una línea compacta con los límites del plan de Claude
+(ventana de 5 h y semanal) para el borde derecho de la barra de tabs de herdr:
+
+    5h ███░░░ 32% · 7d ████░░ 68%
+
+Lee el caché que escribe claude/herdr-statusline.sh (statusLine de Claude
+Code) en ${XDG_CACHE_HOME:-~/.cache}/herdr-claude-limits.json; no llama a
+ninguna API ni toca credenciales. Se conecta desde config.toml:
+
+    [ui]
+    tab_bar_right = [
+      { type = "command", command = "~/.local/bin/claude-limits-bar",
+        interval_seconds = 5, timeout_seconds = 2 },
+    ]
+
+Sin caché (nunca ha corrido Claude con plan Pro/Max) imprime nada y herdr
+oculta la entrada. Si una ventana ya pasó su resets_at, se muestra en 0%
+(el límite ya se reinició). Un "~" antes del porcentaje marca un dato de hace
+más de 30 min: puede estar desactualizado (nadie ha usado Claude desde
+entonces).
+"""
+import json
+import os
+import time
+
+BAR_WIDTH = 6
+STALE_SECONDS = 30 * 60
+
+
+def bar(pct):
+    filled = max(0, min(BAR_WIDTH, round(pct / 100 * BAR_WIDTH)))
+    return "█" * filled + "░" * (BAR_WIDTH - filled)
+
+
+def main():
+    cache_dir = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    try:
+        with open(os.path.join(cache_dir, "herdr-claude-limits.json"), encoding="utf-8") as fh:
+            cache = json.load(fh)
+    except (OSError, ValueError):
+        return
+
+    now = time.time()
+    stale = now - (cache.get("updated") or 0) > STALE_SECONDS
+    parts = []
+    for name, key in (("5h", "five_hour"), ("7d", "seven_day")):
+        window = cache.get(key) or {}
+        pct = window.get("used_percentage")
+        if pct is None:
+            continue
+        resets_at = window.get("resets_at")
+        if resets_at and resets_at <= now:
+            pct, mark = 0, ""  # la ventana ya se reinició
+        else:
+            mark = "~" if stale else ""
+        parts.append(f"{name} {bar(pct)} {mark}{pct:.0f}%")
+    if parts:
+        print(" · ".join(parts))
+
+
+if __name__ == "__main__":
+    main()

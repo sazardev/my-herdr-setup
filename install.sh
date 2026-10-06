@@ -46,6 +46,7 @@ mkdir -p "$HOME/.local/bin"
 link "$REPO_DIR/scripts/herdr-workspace" "$HOME/.local/bin/herdr-workspace"
 link "$REPO_DIR/scripts/herdr-workspace-safe" "$HOME/.local/bin/herdr-workspace-safe"
 link "$REPO_DIR/scripts/claude-usage-report" "$HOME/.local/bin/claude-usage-report"
+link "$REPO_DIR/scripts/claude-limits-bar" "$HOME/.local/bin/claude-limits-bar"
 
 echo "instalando hook y statusline custom de Claude Code…"
 link "$REPO_DIR/claude/hooks/herdr-usage-metadata.sh" "$HOME/.claude/hooks/herdr-usage-metadata.sh"

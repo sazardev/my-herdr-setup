@@ -86,7 +86,8 @@ def humanize(n):
 cost = f"≈${totals['cost_usd']:,.2f}"
 if totals.get("unpriced_requests"):
     cost += "+"  # hubo requests de un modelo sin precio conocido: el real es mayor
-cost += " api"  # equivalente a precios de API, no un cobro (el plan es de cuota fija)
+# El "≈" ya marca que es un equivalente a precios de API y no un cobro (plan de
+# cuota fija); sin sufijo para que quepa junto al workspace en el sidebar.
 
 request = {
     "id": f"herdr-usage-metadata:{pane_id}",

@@ -54,11 +54,22 @@ sidebar_width = 34
 sidebar_min_width = 34
 sidebar_max_width = 34
 
-# Título de la ventana del terminal host (barra de Windows / Alacritty).
-# Vacío = herdr no lo toca: lo escribe claude/herdr-statusline.sh con las
-# barras de los límites 5h / 7d del plan (una sola vez, en vez de repetirlas
-# en cada agente). Para volver al título por workspace: "{hostname}: {workspace}".
-window_title = ""
+# Título de la ventana del terminal host (barra de Windows / Alacritty):
+# distingue de qué workspace es cada ventana.
+window_title = "{hostname}: {workspace}"
+
+# Estado a la derecha de la barra de tabs (herdr cede espacio a los tabs
+# cuando el ancho es poco, así que se adapta solo; no ocupa filas extra).
+#   zoom   -> "ZOOM" mientras el tab activo está en zoom
+#   command-> límites 5h / semanal del plan de Claude, UNA vez para toda la
+#             cuenta (en vez de repetirlos en cada agente). Los dibuja
+#             scripts/claude-limits-bar desde el caché que escribe el
+#             statusLine de Claude Code (claude/herdr-statusline.sh).
+tab_bar_right = [
+  { type = "zoom" },
+  { type = "command", command = "~/.local/bin/claude-limits-bar", interval_seconds = 5, timeout_seconds = 2 },
+]
+tab_bar_right_separator = "  "
 
 [ui.toast]
 # Toast dentro de herdr cuando un agente en segundo plano termina o se
@@ -76,18 +87,26 @@ delay_seconds = 1
 enabled = true
 
 [ui.sidebar.agents]
-# Fila 1 = default de herdr. Se quitó la fila ["agent"] (nombre del agente:
-# claude/opencode…) por no aportar. terminal_title_stripped muestra en qué
-# está trabajando el agente ahora. $cost viene del hook "Stop" de Claude Code
-# (claude/hooks/herdr-usage-metadata.sh): gasto estimado en USD de la sesión
-# de ese pane a precios de API pública; solo sube, no fluctúa. El hook también
-# reporta $tok (tokens totales) y $cachep (% de escrituras de caché), pero no
-# se muestran: no responden "cuánto llevo gastado". $cost lleva "api" porque
-# con plan Max es un equivalente a precios de API, no un cobro.
+# Dos líneas por agente (el sidebar no soporta alinear a la derecha, así que
+# el costo va pegado a continuación del workspace en la misma línea):
+#   1) estado · workspace · $cost
+#   2) en qué está trabajando el agente (terminal_title_stripped)
+# Se quitó la fila ["agent"] (claude/opencode…) por no aportar. El tab "1" de
+# los workspaces con un solo tab es ruido, así que `tab` se quitó de la línea 1
+# (si algún día usas varios tabs por workspace, vuelve a agregarlo; las reglas
+# condicionales `rules = [{ equals = "1", hide = true }]` que lo ocultarían
+# solo cuando vale "1" existen desde herdr 0.9.x: en 0.8.2 dan error de parseo).
+# $cost viene del hook "Stop" de Claude Code (claude/hooks/herdr-usage-metadata.sh):
+# gasto estimado en USD de la sesión de ese pane a precios de API pública (con
+# plan Max es un equivalente, no un cobro; por eso el "≈"). Solo sube. El hook
+# también reporta $tok y $cachep, que no se muestran.
 # Los límites 5 h / semanal del plan (de toda la cuenta) NO van aquí: serían
-# idénticos en cada agente. Se muestran en el título de la ventana (ver
-# window_title más arriba).
-rows = [["state_icon", "workspace", "tab"], ["terminal_title_stripped"], ["$cost"]]
+# idénticos en cada agente. Se muestran a la derecha de la barra de tabs (ver
+# tab_bar_right más arriba).
+rows = [
+  ["state_icon", "workspace", "$cost"],
+  ["terminal_title_stripped"],
+]
 
 [keys]
 # prefix+shift+1..9 cambia de workspace directo por índice, sin pasar por

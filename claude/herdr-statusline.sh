@@ -6,20 +6,17 @@
 #   rate_limits.five_hour.{used_percentage,resets_at}   rolling 5-hour window
 #   rate_limits.seven_day.{used_percentage,resets_at}   weekly window
 # These are the same numbers `/usage` shows — no credentials read, no
-# undocumented endpoint. They are account-wide, so they are shown ONCE (in
-# the terminal window title) instead of repeated on every agent row.
+# undocumented endpoint.
 #
-# Does two things:
-#   1. prints a line for Claude Code's own status bar, with reset countdowns:
-#        5h ███░░░░░ 32% ↻3h28m · 7d █████░░░ 68% ↻5d6h
-#   2. if running inside a Herdr pane, sets the terminal window title through
-#      the socket API (client.window_title.set), minimal, no resets:
-#        5h ███░░░░░ 32%  ·  7d █████░░░ 68%
-#      Needs `window_title = ""` in config.toml [ui], otherwise herdr
-#      rewrites the title itself on every workspace/tab change.
+# It only CACHES them in ${XDG_CACHE_HOME:-~/.cache}/herdr-claude-limits.json
+# (atomic write) and prints nothing, so Claude Code's own status row stays
+# empty. herdr's tab bar draws them through scripts/claude-limits-bar
+# ([ui] tab_bar_right in config.toml), once for the whole account, at the
+# right of the tab bar.
 #
-# Each window may be absent (API-key users, or before the first response in
-# a session): then nothing is printed or set. Always exits 0.
+# Works inside or outside a Herdr pane. Each window may be absent (API-key
+# users, or before the first response in a session): then nothing is cached.
+# Always exits 0.
 set -u
 
 command -v python3 >/dev/null 2>&1 || exit 0
@@ -27,8 +24,8 @@ command -v python3 >/dev/null 2>&1 || exit 0
 python3 -c '
 import json
 import os
-import socket
 import sys
+import tempfile
 import time
 
 try:
@@ -37,65 +34,20 @@ except Exception:
     raise SystemExit(0)
 
 limits = data.get("rate_limits") or {}
-BAR_WIDTH = 8
-
-
-def bar(pct):
-    filled = max(0, min(BAR_WIDTH, round(pct / 100 * BAR_WIDTH)))
-    return "█" * filled + "░" * (BAR_WIDTH - filled)
-
-
-def fmt_reset(resets_at):
-    secs = int(resets_at - time.time())
-    if secs <= 0:
-        return ""
-    days, rem = divmod(secs, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes = rem // 60
-    if days:
-        return f"{days}d{hours}h"
-    if hours:
-        return f"{hours}h{minutes:02d}m"
-    return f"{minutes}m"
-
-
-def window(name, key):
-    w = limits.get(key) or {}
-    pct = w.get("used_percentage")
-    if pct is None:
-        return None
-    reset = fmt_reset(w["resets_at"]) if w.get("resets_at") else ""
-    return f"{name} {bar(pct)} {pct:.0f}%", reset
-
-
-windows = [w for w in (window("5h", "five_hour"), window("7d", "seven_day")) if w]
-if not windows:
+five = limits.get("five_hour") or {}
+seven = limits.get("seven_day") or {}
+if five.get("used_percentage") is None and seven.get("used_percentage") is None:
     raise SystemExit(0)
 
-print(" · ".join(f"{text} ↻{reset}" if reset else text for text, reset in windows))
-
-if os.environ.get("HERDR_ENV") != "1":
-    raise SystemExit(0)
-sock_path = os.environ.get("HERDR_SOCKET_PATH")
-if not sock_path:
-    raise SystemExit(0)
-
-request = {
-    "id": "herdr-rate-limits-title",
-    "method": "client.window_title.set",
-    "params": {"title": "  ·  ".join(text for text, _ in windows)},
-}
+cache_dir = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+cache_file = os.path.join(cache_dir, "herdr-claude-limits.json")
 try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
-    client.connect(sock_path)
-    client.sendall((json.dumps(request) + "\n").encode())
-    try:
-        client.recv(4096)
-    except Exception:
-        pass
-    client.close()
-except Exception:
+    os.makedirs(cache_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix=".herdr-claude-limits.")
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"updated": int(time.time()), "five_hour": five, "seven_day": seven}, fh)
+    os.replace(tmp, cache_file)
+except OSError:
     pass
 '
 exit 0

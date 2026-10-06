@@ -19,10 +19,9 @@ name = "gruvbox"
 auto_switch = false
 
 [ui]
-# Ordena el panel de agentes por prioridad de atención (quién necesita
-# respuesta) en vez de agrupar por espacio/workspace. Útil con varios
-# agentes corriendo en paralelo.
-agent_panel_sort = "priority"
+# Agrupa el panel de agentes por space/workspace (proyecto). La alternativa
+# "priority" los ordena por quién necesita respuesta primero.
+agent_panel_sort = "spaces"
 
 # Sin espacio extra entre panes: comparten el borde divisor en vez de tener
 # un gap visual. Máximo aprovechamiento de pantalla en splits.
@@ -38,42 +37,52 @@ pane_borders = true
 hide_tab_bar_when_single_tab = true
 
 show_agent_labels_on_pane_borders = true
+
+# Símbolos distintos por estado (bloqueado/trabajando/terminado/inactivo) en
+# vez de solo color: se distinguen de un vistazo sin depender del tema.
+status_indicators = "symbols"
+
+# Sidebar de ancho fijo: no "respira" al cambiar de proyecto/workspace.
+sidebar_width = 34
+sidebar_min_width = 34
+sidebar_max_width = 34
+
+# Título de la ventana del terminal host (barra de Windows / Alacritty):
+# distingue de qué workspace es cada ventana.
+window_title = "{hostname}: {workspace}"
+
 [ui.toast]
-# Sin notificaciones pop-up (ni in-app ni del sistema). El estado de cada
-# agente ya se ve en el sidebar; los toasts no aportan aquí y distraen.
+# Toast dentro de herdr cuando un agente en segundo plano termina o se
+# bloquea esperando respuesta. Otros valores: "off", "terminal" (notificación
+# del terminal host), "system" (servicio de notificaciones del SO).
 delivery = "herdr"
+
+# Solo avisa si el agente sigue en ese estado tras 1 s: filtra parpadeos
+# working<->idle y evita fatiga de alertas.
+delay_seconds = 1
+
+[ui.sound]
+# Sonido cuando un agente cambia de estado en un workspace en segundo plano.
+# Requiere audio en WSL: usa el PulseServer de WSLg (/mnt/wslg/PulseServer).
+enabled = true
+
+[ui.sidebar.agents]
+# Fila extra con metadata custom reportada por el hook "Stop" de Claude Code
+# en claude/hooks/herdr-usage-metadata.sh (ver README): $tok = tokens totales
+# de la sesión de este pane (input+output+cache_read+cache_creation), $cachep
+# = % de esos tokens gastados en cache_creation (cache fresco, no reusado —
+# alto y sostenido ahí es la señal de "estoy perdiendo tokens").
+# Las primeras dos filas son el default de herdr sin tocar. La tercera
+# (terminal_title_stripped) muestra en qué está trabajando el agente ahora.
+rows = [["state_icon", "workspace", "tab"], ["agent"], ["terminal_title_stripped"], ["$tok", "$cachep"]]
 
 [keys]
 # prefix+shift+1..9 cambia de workspace directo por índice, sin pasar por
 # el workspace picker (prefix+w).
 switch_workspace = "prefix+shift+1..9"
 
-# Moverse entre panes con las flechas además de hjkl (foco por dirección).
-focus_pane_left = "prefix+left"
-focus_pane_down = "prefix+down"
-focus_pane_up = "prefix+up"
-focus_pane_right = "prefix+right"
-
-# hjkl quedan libres al reasignar focus_pane_* arriba, así que se re-bindean
-# aquí como comandos custom hacia la misma acción de foco (mismo comando que
-# usa `herdr pane focus` internamente). Resultado: flechas y hjkl funcionan
-# ambos para moverse entre panes.
-[[keys.command]]
-key = "prefix+h"
-type = "shell"
-command = "herdr pane focus --direction left --current"
-
-[[keys.command]]
-key = "prefix+j"
-type = "shell"
-command = "herdr pane focus --direction down --current"
-
-[[keys.command]]
-key = "prefix+k"
-type = "shell"
-command = "herdr pane focus --direction up --current"
-
-[[keys.command]]
-key = "prefix+l"
-type = "shell"
-command = "herdr pane focus --direction right --current"
+# Foco entre panes: sin overrides a propósito. El default de herdr ya es
+# prefix (ctrl+b) + h/j/k/l, y en modo navegación las flechas izq/der también
+# mueven el foco. Antes se reasignaba focus_pane_* a las flechas y se
+# re-bindeaba hjkl como comandos shell; en navigate mode las flechas
+# arriba/abajo cambian de workspace (no de pane) y eso chocaba con el override.

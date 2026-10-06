@@ -6,11 +6,20 @@
 #   1) symlink de herdr/config.toml -> ~/.config/herdr/config.toml
 #      (si ya existe un config.toml real, se respalda como .bak antes de
 #      reemplazarlo por el symlink)
-#   2) symlink de scripts/herdr-workspace(-safe) -> ~/.local/bin/
-#   3) si herdr está corriendo, recarga el config con `herdr server reload-config`
+#   2) symlink de scripts/herdr-workspace(-safe) y claude-usage-report ->
+#      ~/.local/bin/
+#   3) symlink de claude/hooks/herdr-usage-metadata.sh -> ~/.claude/hooks/
+#      (hook custom de Claude Code, sibling de herdr-agent-state.sh —
+#      NO lo reemplaza; ese sigue gestionado por `herdr integration`)
+#   4) si herdr está corriendo, recarga el config con `herdr server reload-config`
 #
 # No toca ~/.config/herdr-workspaces/list.conf: ese archivo es privado por
 # proyecto y no vive en este repo (ver scripts/list.conf.example).
+#
+# El hook de herdr-usage-metadata.sh necesita además una entrada "Stop" en
+# ~/.claude/settings.json (no se toca automáticamente porque ese archivo
+# tiene más config personal tuya) — ver README para el bloque exacto a
+# fusionar a mano.
 set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -32,6 +41,11 @@ echo "instalando scripts de workspace…"
 mkdir -p "$HOME/.local/bin"
 link "$REPO_DIR/scripts/herdr-workspace" "$HOME/.local/bin/herdr-workspace"
 link "$REPO_DIR/scripts/herdr-workspace-safe" "$HOME/.local/bin/herdr-workspace-safe"
+link "$REPO_DIR/scripts/claude-usage-report" "$HOME/.local/bin/claude-usage-report"
+
+echo "instalando hook custom de Claude Code…"
+link "$REPO_DIR/claude/hooks/herdr-usage-metadata.sh" "$HOME/.claude/hooks/herdr-usage-metadata.sh"
+chmod +x "$HOME/.claude/hooks/herdr-usage-metadata.sh"
 
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;

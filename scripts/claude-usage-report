@@ -16,6 +16,13 @@ Uso:
   claude-usage-report --since 2026-09-20    # desde esa fecha (incl.)
   claude-usage-report --project agentic     # filtra por substring del path del proyecto
   claude-usage-report --by-day              # desglosa por día además de por proyecto/modelo
+  claude-usage-report --transcript FILE     # una sola sesión, en JSON (lo usa el hook de herdr)
+
+El costo en USD es una ESTIMACIÓN a precios de API pública (tabla PRICES, USD
+por millón de tokens): tokens de cada request × precio de su modelo. Si usas
+un plan de suscripción (Pro/Max) es el equivalente en API, no lo que se te
+cobra. Escrituras de caché: 1.25× el precio de input (TTL 5 min) o 2× (TTL 1 h,
+el que usa Claude Code), según el desglose que trae cada request.
 """
 import argparse
 import json
@@ -25,6 +32,50 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+# (prefijo de model id) -> (input, output, cache_read) en USD por millón de
+# tokens. Se busca el prefijo más largo que coincida. Fuente: tabla de modelos
+# de la skill claude-api (cacheada 2026-09-25); revisar cuando salgan modelos.
+PRICES = {
+    "claude-fable-5": (10.0, 50.0, 0.25),
+    "claude-mythos-5": (10.0, 50.0, 0.25),
+    "claude-opus-5-5": (4.0, 20.0, 0.20),
+    "claude-opus-5": (5.0, 25.0, 0.50),
+    "claude-opus-4": (5.0, 25.0, 0.50),
+    "claude-sonnet-5": (2.0, 10.0, 0.20),
+    "claude-sonnet-4": (3.0, 15.0, 0.30),
+    "claude-haiku-4-5": (1.0, 5.0, 0.10),
+}
+
+
+def price_for(model):
+    best = None
+    for prefix in PRICES:
+        if (model or "").startswith(prefix) and (best is None or len(prefix) > len(best)):
+            best = prefix
+    return PRICES[best] if best else None
+
+
+def usage_cost(model, usage):
+    """USD estimados de un request, o None si el modelo no está en PRICES."""
+    if model == "<synthetic>":  # mensajes locales de Claude Code, sin tokens facturables
+        return 0.0
+    price = price_for(model)
+    if price is None:
+        return None
+    p_in, p_out, p_read = price
+    breakdown = usage.get("cache_creation") or {}
+    write_1h = breakdown.get("ephemeral_1h_input_tokens") or 0
+    write_5m = breakdown.get("ephemeral_5m_input_tokens")
+    if write_5m is None:  # sin desglose: todo se asume TTL de 5 min
+        write_5m = (usage.get("cache_creation_input_tokens") or 0) - write_1h
+    return (
+        (usage.get("input_tokens") or 0) * p_in
+        + (usage.get("output_tokens") or 0) * p_out
+        + (usage.get("cache_read_input_tokens") or 0) * p_read
+        + write_5m * p_in * 1.25
+        + write_1h * p_in * 2.0
+    ) / 1_000_000
 
 
 def parse_since(value):
@@ -44,6 +95,44 @@ def short_project(dirname):
     return dirname.lstrip("-")
 
 
+def iter_file_records(jsonl, label, since=None):
+    try:
+        with jsonl.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") != "assistant":
+                    continue
+                message = obj.get("message") or {}
+                usage = message.get("usage")
+                if not usage:
+                    continue
+                ts_raw = obj.get("timestamp")
+                try:
+                    ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")) if ts_raw else None
+                except ValueError:
+                    ts = None
+                if since and ts and ts < since:
+                    continue
+                yield {
+                    "project": label,
+                    "model": message.get("model") or "?",
+                    "date": ts.date().isoformat() if ts else "?",
+                    "input": usage.get("input_tokens") or 0,
+                    "output": usage.get("output_tokens") or 0,
+                    "cache_read": usage.get("cache_read_input_tokens") or 0,
+                    "cache_creation": usage.get("cache_creation_input_tokens") or 0,
+                    "cost": usage_cost(message.get("model"), usage),
+                }
+    except OSError:
+        return
+
+
 def iter_usage_records(since, project_filter):
     if not PROJECTS_DIR.is_dir():
         return
@@ -54,40 +143,26 @@ def iter_usage_records(since, project_filter):
         if project_filter and project_filter not in label:
             continue
         for jsonl in project_dir.glob("*.jsonl"):
-            try:
-                with jsonl.open(encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if obj.get("type") != "assistant":
-                            continue
-                        message = obj.get("message") or {}
-                        usage = message.get("usage")
-                        if not usage:
-                            continue
-                        ts_raw = obj.get("timestamp")
-                        try:
-                            ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")) if ts_raw else None
-                        except ValueError:
-                            ts = None
-                        if since and ts and ts < since:
-                            continue
-                        yield {
-                            "project": label,
-                            "model": message.get("model") or "?",
-                            "date": ts.date().isoformat() if ts else "?",
-                            "input": usage.get("input_tokens") or 0,
-                            "output": usage.get("output_tokens") or 0,
-                            "cache_read": usage.get("cache_read_input_tokens") or 0,
-                            "cache_creation": usage.get("cache_creation_input_tokens") or 0,
-                        }
-            except OSError:
-                continue
+            yield from iter_file_records(jsonl, label, since)
+
+
+def transcript_summary(path):
+    """Totales de UNA sesión en JSON (lo consume el hook de herdr)."""
+    fields = ("input", "output", "cache_read", "cache_creation")
+    total = dict.fromkeys(fields, 0)
+    cost, unpriced = 0.0, 0
+    for rec in iter_file_records(Path(path), "-"):
+        for f in fields:
+            total[f] += rec[f]
+        if rec["cost"] is None:
+            unpriced += 1
+        else:
+            cost += rec["cost"]
+    print(json.dumps({**total, "cost_usd": round(cost, 4), "unpriced_requests": unpriced}))
+
+
+def format_usd(value):
+    return f"${value:,.2f}"
 
 
 def main():
@@ -95,17 +170,28 @@ def main():
     ap.add_argument("--since", help="'today', o fecha ISO (2026-09-20)")
     ap.add_argument("--project", help="filtra por substring del nombre del proyecto/slot")
     ap.add_argument("--by-day", action="store_true", help="desglosa también por día")
+    ap.add_argument("--transcript", metavar="FILE", help="resume solo ese transcript JSONL y lo imprime como JSON")
     args = ap.parse_args()
+
+    if args.transcript is not None:
+        transcript_summary(args.transcript)
+        return
 
     since = parse_since(args.since)
     key_fields = ("project", "model") + (("date",) if args.by_day else ())
     totals = defaultdict(lambda: defaultdict(int))
+    costs = defaultdict(float)
+    unpriced = defaultdict(int)
     requests = defaultdict(int)
 
     for rec in iter_usage_records(since, args.project):
         key = tuple(rec[f] for f in key_fields)
         for field in ("input", "output", "cache_read", "cache_creation"):
             totals[key][field] += rec[field]
+        if rec["cost"] is None:
+            unpriced[key] += 1
+        else:
+            costs[key] += rec["cost"]
         requests[key] += 1
 
     if not totals:
@@ -116,20 +202,23 @@ def main():
     for key, t in totals.items():
         total_input_side = t["input"] + t["cache_read"] + t["cache_creation"]
         cache_creation_pct = (t["cache_creation"] / total_input_side * 100) if total_input_side else 0.0
-        rows.append((*key, requests[key], t["input"], t["output"], t["cache_read"], t["cache_creation"], cache_creation_pct))
+        rows.append((*key, requests[key], t["input"], t["output"], t["cache_read"], t["cache_creation"],
+                     cache_creation_pct, costs[key], unpriced[key]))
 
-    rows.sort(key=lambda r: -(r[len(key_fields) + 2] + r[len(key_fields) + 4]))  # por cache_read+cache_creation desc
+    rows.sort(key=lambda r: -r[-2])  # por costo estimado desc
 
-    headers = list(key_fields) + ["reqs", "input", "output", "cache_read", "cache_creation", "%cache_creation"]
-    widths = [max(len(h), *(len(str(r[i])) for r in rows)) for i, h in enumerate(headers)]
-    fmt = "  ".join("{:<%d}" % w for w in widths[:-1]) + "  {:>%d}" % widths[-1]
+    headers = list(key_fields) + ["reqs", "input", "output", "cache_read", "cache_creation", "%cache_creation", "$ est."]
+    display = []
+    for r in rows:
+        cost = format_usd(r[-2]) + ("*" if r[-1] else "")  # * = hay requests de modelos sin precio en PRICES
+        display.append([*r[:-3], f"{r[-3]:.0f}%", cost])
+    widths = [max(len(h), *(len(str(d[i])) for d in display)) for i, h in enumerate(headers)]
+    fmt = "  ".join("{:<%d}" % w for w in widths[:-2]) + "  {:>%d}  {:>%d}" % (widths[-2], widths[-1])
 
     print(fmt.format(*headers))
     print(fmt.format(*["-" * w for w in widths]))
-    for r in rows:
-        r = list(r)
-        r[-1] = f"{r[-1]:.0f}%"
-        print(fmt.format(*r))
+    for d in display:
+        print(fmt.format(*d))
 
     grand = defaultdict(int)
     grand_reqs = 0
@@ -139,11 +228,11 @@ def main():
             grand[f] += t[f]
     print()
     print(f"total: {grand_reqs} requests · input={grand['input']} output={grand['output']} "
-          f"cache_read={grand['cache_read']} cache_creation={grand['cache_creation']}")
-    print("nota: sin $ — para costo exacto por request usa el exporter OTel console de Claude Code "
-          "(CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=console OTEL_LOGS_EXPORTER=console, "
-          "solo en invocaciones headless `claude -p`, nunca en sesión interactiva: el exporter console "
-          "rompe la TUI) o la consola de uso de Anthropic.")
+          f"cache_read={grand['cache_read']} cache_creation={grand['cache_creation']} "
+          f"· ≈ {format_usd(sum(costs.values()))}")
+    print("nota: $ est. = estimación a precios de API pública (tabla PRICES arriba), no lo que "
+          "se cobra si estás en plan de suscripción. '*' = hubo requests de un modelo sin "
+          "precio en PRICES (no suman). Costo exacto: consola de uso de Anthropic.")
 
 
 if __name__ == "__main__":

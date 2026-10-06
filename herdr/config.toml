@@ -9,14 +9,21 @@ onboarding = false
 # Cualquier otra opción usa el comportamiento estándar de herdr.
 
 [theme]
-# Tema oscuro con buen contraste y colores tierra, cómodo para sesiones largas.
-# Otros temas built-in: catppuccin, terminal, tokyo-night, dracula, nord,
+# "terminal" = la UI de herdr hereda la paleta ANSI del terminal host
+# (Alacritty): los colores salen del tema de Alacritty, no de uno propio de
+# herdr. Se re-lee al redimensionar/SIGWINCH. Para volver al anterior:
+# name = "gruvbox". Otros built-in: catppuccin, tokyo-night, dracula, nord,
 #                        one-dark, solarized, kanagawa, rose-pine, vesper
-name = "gruvbox"
+name = "terminal"
 
 # No seguir automáticamente el modo claro/oscuro del terminal host:
 # el tema se elige manualmente arriba y se queda fijo entre sistemas.
 auto_switch = false
+
+[theme.custom]
+# "reset" = usa el fondo por defecto del terminal en vez de pintar uno propio:
+# herdr queda "transparente" y se ve exactamente el fondo de Alacritty.
+panel_bg = "reset"
 
 [ui]
 # Agrupa el panel de agentes por space/workspace (proyecto). La alternativa
@@ -67,14 +74,14 @@ delay_seconds = 1
 enabled = true
 
 [ui.sidebar.agents]
-# Fila extra con metadata custom reportada por el hook "Stop" de Claude Code
-# en claude/hooks/herdr-usage-metadata.sh (ver README): $tok = tokens totales
-# de la sesión de este pane (input+output+cache_read+cache_creation), $cachep
-# = % de esos tokens gastados en cache_creation (cache fresco, no reusado —
-# alto y sostenido ahí es la señal de "estoy perdiendo tokens").
-# Las primeras dos filas son el default de herdr sin tocar. La tercera
-# (terminal_title_stripped) muestra en qué está trabajando el agente ahora.
-rows = [["state_icon", "workspace", "tab"], ["agent"], ["terminal_title_stripped"], ["$tok", "$cachep"]]
+# Fila 1 = default de herdr. Se quitó la fila ["agent"] (nombre del agente:
+# claude/opencode…) por no aportar. terminal_title_stripped muestra en qué
+# está trabajando el agente ahora. $cost viene del hook "Stop" de Claude Code
+# (claude/hooks/herdr-usage-metadata.sh): gasto estimado en USD de la sesión
+# de ese pane a precios de API pública; solo sube, no fluctúa. El hook también
+# reporta $tok (tokens totales) y $cachep (% de escrituras de caché), pero no
+# se muestran: no responden "cuánto llevo gastado".
+rows = [["state_icon", "workspace", "tab"], ["terminal_title_stripped"], ["$cost"]]
 
 [keys]
 # prefix+shift+1..9 cambia de workspace directo por índice, sin pasar por

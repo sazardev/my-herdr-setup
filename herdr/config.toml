@@ -54,9 +54,11 @@ sidebar_width = 34
 sidebar_min_width = 34
 sidebar_max_width = 34
 
-# Título de la ventana del terminal host (barra de Windows / Alacritty):
-# distingue de qué workspace es cada ventana.
-window_title = "{hostname}: {workspace}"
+# Título de la ventana del terminal host (barra de Windows / Alacritty).
+# Vacío = herdr no lo toca: lo escribe claude/herdr-statusline.sh con las
+# barras de los límites 5h / 7d del plan (una sola vez, en vez de repetirlas
+# en cada agente). Para volver al título por workspace: "{hostname}: {workspace}".
+window_title = ""
 
 [ui.toast]
 # Toast dentro de herdr cuando un agente en segundo plano termina o se
@@ -80,7 +82,11 @@ enabled = true
 # (claude/hooks/herdr-usage-metadata.sh): gasto estimado en USD de la sesión
 # de ese pane a precios de API pública; solo sube, no fluctúa. El hook también
 # reporta $tok (tokens totales) y $cachep (% de escrituras de caché), pero no
-# se muestran: no responden "cuánto llevo gastado".
+# se muestran: no responden "cuánto llevo gastado". $cost lleva "api" porque
+# con plan Max es un equivalente a precios de API, no un cobro.
+# Los límites 5 h / semanal del plan (de toda la cuenta) NO van aquí: serían
+# idénticos en cada agente. Se muestran en el título de la ventana (ver
+# window_title más arriba).
 rows = [["state_icon", "workspace", "tab"], ["terminal_title_stripped"], ["$cost"]]
 
 [keys]

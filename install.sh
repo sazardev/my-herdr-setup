@@ -20,6 +20,10 @@
 # ~/.claude/settings.json (no se toca automáticamente porque ese archivo
 # tiene más config personal tuya) — ver README para el bloque exacto a
 # fusionar a mano.
+#
+# claude/herdr-statusline.sh (límites 5h/7d del plan Pro/Max en el sidebar)
+# se conecta con una clave "statusLine" en ese mismo settings.json:
+#   "statusLine": { "type": "command", "command": "sh ~/.claude/herdr-statusline.sh" }
 set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -43,9 +47,11 @@ link "$REPO_DIR/scripts/herdr-workspace" "$HOME/.local/bin/herdr-workspace"
 link "$REPO_DIR/scripts/herdr-workspace-safe" "$HOME/.local/bin/herdr-workspace-safe"
 link "$REPO_DIR/scripts/claude-usage-report" "$HOME/.local/bin/claude-usage-report"
 
-echo "instalando hook custom de Claude Code…"
+echo "instalando hook y statusline custom de Claude Code…"
 link "$REPO_DIR/claude/hooks/herdr-usage-metadata.sh" "$HOME/.claude/hooks/herdr-usage-metadata.sh"
 chmod +x "$HOME/.claude/hooks/herdr-usage-metadata.sh"
+link "$REPO_DIR/claude/herdr-statusline.sh" "$HOME/.claude/herdr-statusline.sh"
+chmod +x "$HOME/.claude/herdr-statusline.sh"
 
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;

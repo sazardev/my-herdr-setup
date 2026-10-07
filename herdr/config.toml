@@ -25,6 +25,12 @@ auto_switch = false
 # herdr queda "transparente" y se ve exactamente el fondo de Alacritty.
 panel_bg = "reset"
 
+# Borde de los panes NO activos. En modo "terminal", overlay0 cae por defecto
+# en el ANSI "white" (slot 7), que en casi todos los temas es un color claro y
+# queda muy brillante. "darkgray" = ANSI bright black (slot 8): sigue el tema de
+# Alacritty, pero atenuado. El pane activo usa `accent` (= ANSI blue, slot 4).
+overlay0 = "darkgray"
+
 [ui]
 # Agrupa el panel de agentes por space/workspace (proyecto). La alternativa
 # "priority" los ordena por quién necesita respuesta primero.

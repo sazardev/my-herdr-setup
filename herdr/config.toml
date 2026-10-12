@@ -119,6 +119,16 @@ rows = [
 # el workspace picker (prefix+w).
 switch_workspace = "prefix+shift+1..9"
 
+# Navegación entre worktrees (cada worktree es un workspace del sidebar).
+# prefix+, / prefix+. = workspace anterior / siguiente (no se usa [ ] porque
+# prefix+[ ya es copy_mode). prefix+; = volver al último pane enfocado, aunque
+# esté en otro workspace/tab (alterna entre dos worktrees). prefix+shift+o abre
+# un worktree existente del repo; crear sigue en prefix+shift+g.
+previous_workspace = "prefix+,"
+next_workspace = "prefix+."
+last_pane = "prefix+;"
+open_worktree = "prefix+shift+o"
+
 # Foco entre panes: sin overrides a propósito. El default de herdr ya es
 # prefix (ctrl+b) + h/j/k/l, y en modo navegación las flechas izq/der también
 # mueven el foco. Antes se reasignaba focus_pane_* a las flechas y se
